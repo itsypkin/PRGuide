@@ -25,3 +25,6 @@ rustc-ice-*.txt
 
 # oh-my-claudecode runtime state (any directory level)
 .omc/
+
+# PM scratch folder
+/.pm/
