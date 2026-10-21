@@ -1,1 +1,1 @@
-//! Viewer support, filled by a T6 task.
+//! Viewer clipboard support, filled by T6-10.

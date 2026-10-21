@@ -1,1 +1,1 @@
-//! Viewer support, filled by a T6 task.
+//! Viewer component composition, filled by T6-1.

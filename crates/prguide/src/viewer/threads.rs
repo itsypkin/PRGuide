@@ -1,1 +1,1 @@
-//! Viewer support, filled by a T6 task.
+//! Viewer thread display, filled by T6-5.

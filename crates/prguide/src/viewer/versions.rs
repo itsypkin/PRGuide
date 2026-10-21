@@ -1,1 +1,1 @@
-//! Viewer support, filled by a T6 task.
+//! Viewer version selection, filled by T6-7.

@@ -1,1 +1,1 @@
-//! Viewer support, filled by a T6 task.
+//! Viewer GitHub posting flow, filled by T7-4.

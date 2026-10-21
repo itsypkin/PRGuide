@@ -1,1 +1,1 @@
-//! Viewer support, filled by a T6 task.
+//! Viewer diagram rendering, filled by T6-9.

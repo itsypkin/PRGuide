@@ -25,8 +25,10 @@ fn error_result(command: &mut Command) -> Value {
     value
 }
 
-fn usage(command: &mut Command) {
-    assert_eq!(error_result(command)["code"], "usage");
+fn usage(command: &mut Command) -> Value {
+    let value = error_result(command);
+    assert_eq!(value["code"], "usage");
+    value
 }
 fn not_implemented(command: &mut Command, message: &str) {
     let value = error_result(command);
@@ -209,7 +211,15 @@ fn invalid_invocations_report_usage_json() {
     for args in cases {
         let mut command = command();
         command.args(*args);
-        usage(&mut command);
+        let value = usage(&mut command);
+        if matches!(*args, [] | ["guide"] | ["skill"]) {
+            assert!(
+                value["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("requires a subcommand")
+            );
+        }
     }
     let mut forced = command();
     forced.env("CLICOLOR_FORCE", "1").arg("frobnicate");
@@ -237,40 +247,37 @@ mod unix {
     use super::{not_implemented, usage};
     use assert_cmd::Command;
     use std::os::unix::fs::symlink;
-    use tempfile::tempdir;
-
-    fn linked(name: &str) -> Command {
+    use tempfile::{TempDir, tempdir};
+    fn linked(name: &str) -> (TempDir, Command) {
         let dir = tempdir().unwrap();
         let path = dir.path().join(name);
         symlink(env!("CARGO_BIN_EXE_prguide"), &path).unwrap();
-        let command = Command::new(&path);
-        std::mem::forget(dir);
-        command
+        (dir, Command::new(&path))
     }
 
     #[test]
     fn prg_name_runs_viewer_and_only_exact_name_does() {
-        let mut command = linked("prg");
+        let (_dir, mut command) = linked("prg");
         not_implemented(&mut command, "viewer");
-        let mut command = linked("prg");
+        let (_dir, mut command) = linked("prg");
         command.arg("12");
         not_implemented(&mut command, "viewer");
-        let mut command = linked("prg");
+        let (_dir, mut command) = linked("prg");
         command.arg("abc");
         usage(&mut command);
-        let mut command = linked("prg");
+        let (_dir, mut command) = linked("prg");
         command.args(["1", "2"]);
         usage(&mut command);
-        let mut command = linked("prgx");
+        let (_dir, mut command) = linked("prgx");
         usage(&mut command);
-        let mut command = linked("prgx");
+        let (_dir, mut command) = linked("prgx");
         command.args(["status", "--run", "r_x"]);
         not_implemented(&mut command, "status");
     }
 
     #[test]
     fn prg_help_succeeds() {
-        let mut command = linked("prg");
+        let (_dir, mut command) = linked("prg");
         let output = command.arg("--help").output().unwrap();
         assert!(output.status.success() && !output.stdout.is_empty());
     }

@@ -1,4 +1,4 @@
-//! Git integration, filled by T2 tasks.
+//! Git integration module; T2-2 through T2-4 fill its child slots.
 
 pub mod diff;
 pub mod refs;

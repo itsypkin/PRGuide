@@ -25,7 +25,7 @@ pub mod view;
 pub mod wait;
 
 #[derive(Debug, Parser)]
-#[command(name = "prguide", version)]
+#[command(name = "prguide", version, arg_required_else_help = false)]
 pub struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -55,12 +55,14 @@ enum Command {
 }
 
 #[derive(Debug, Subcommand)]
+#[command(arg_required_else_help = false)]
 enum GuideCommand {
     New(guide_new::GuideNewArgs),
     Commit(guide_commit::GuideCommitArgs),
 }
 
 #[derive(Debug, Subcommand)]
+#[command(arg_required_else_help = false)]
 enum SkillCommand {
     Install(skill::SkillInstallArgs),
 }

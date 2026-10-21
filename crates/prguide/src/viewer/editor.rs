@@ -1,1 +1,1 @@
-//! Viewer support, filled by a T6 task.
+//! Viewer editor integration, filled by T6-4.

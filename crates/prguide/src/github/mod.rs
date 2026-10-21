@@ -1,4 +1,4 @@
-//! GitHub integration, filled by T2 and T7 tasks.
+//! GitHub integration module; T2-1 and T7-2 through T7-5 fill its child slots.
 
 pub mod fake;
 pub mod gh;

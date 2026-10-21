@@ -1,1 +1,1 @@
-//! Viewer support, filled by a T6 task.
+//! Viewer outbox display, filled by T7-1.

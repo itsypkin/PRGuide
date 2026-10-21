@@ -1,1 +1,1 @@
-//! Viewer support, filled by a T6 task.
+//! Viewer GitHub thread display, filled by T7-5.

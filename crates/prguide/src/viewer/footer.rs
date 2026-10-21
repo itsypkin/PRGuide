@@ -1,1 +1,1 @@
-//! Viewer support, filled by a T6 task.
+//! Viewer footer rendering, filled by T6-1.

@@ -1,1 +1,1 @@
-//! Viewer support, filled by a T6 task.
+//! Viewer key bindings, filled by T6-1.

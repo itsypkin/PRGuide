@@ -1,1 +1,1 @@
-//! Viewer support, filled by a T6 task.
+//! Viewer live update listening, filled by T6-10.
