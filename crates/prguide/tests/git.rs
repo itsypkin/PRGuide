@@ -1,43 +1,61 @@
 mod support;
 
-use prguide::git::{DiffSpec, GitError, Refspec, parse_github_remote};
-use std::fs;
+use prguide::git::{DiffSpec, Git, GitError, Refspec, parse_github_remote};
+use std::{
+    env, fs,
+    process::{Command, Stdio},
+    sync::mpsc,
+    time::Duration,
+};
 use support::fixture_repo::FixtureRepo;
 
 #[test]
 fn github_remote_url_variants() {
-    for url in [
-        "https://github.com/octo/widget",
-        "https://github.com/octo/widget.git/",
-        "https://GitHub.com/Octo/Widget.Git",
-        "https://x:t@github.com/octo/widget.git",
-        "https://github.com:443/octo/widget",
-        "http://github.com/octo/widget",
-        "ssh://git@github.com/octo/widget.git",
-        "git@github.com:octo/widget.git",
-        "github.com:octo/widget",
-    ] {
-        assert!(parse_github_remote(url).is_some(), "{url}");
+    let matches = [
+        ("https://github.com/octo/widget", ("octo", "widget")),
+        ("https://github.com/octo/widget.git", ("octo", "widget")),
+        ("https://github.com/octo/widget/", ("octo", "widget")),
+        ("https://github.com/octo/widget.git/", ("octo", "widget")),
+        ("https://GitHub.com/Octo/Widget.GIT", ("Octo", "Widget")),
+        (
+            "https://x-access-token:tok@github.com/octo/widget.git",
+            ("octo", "widget"),
+        ),
+        ("https://github.com:443/octo/widget", ("octo", "widget")),
+        ("http://github.com/octo/widget", ("octo", "widget")),
+        ("ssh://git@github.com/octo/widget.git", ("octo", "widget")),
+        ("ssh://git@github.com:22/octo/widget", ("octo", "widget")),
+        ("git@github.com:octo/widget.git", ("octo", "widget")),
+        ("git@github.com:octo/widget", ("octo", "widget")),
+        ("github.com:octo/widget", ("octo", "widget")),
+    ];
+    for (url, expected) in matches {
+        assert_eq!(
+            parse_github_remote(url),
+            Some((expected.0.into(), expected.1.into())),
+            "{url}"
+        );
     }
     for url in [
         "https://gitlab.com/octo/widget",
-        "https://github.com//octo/widget",
+        "https://www.github.com/octo/widget",
+        "https://gist.github.com/octo/widget",
+        "https://github.com.evil.com/octo/widget",
+        "https://notgithub.com/octo/widget",
         "https://github.com/octo",
-        "https://github.com/octo/widget/x",
-        "git://github.com/octo/widget",
-        "file:///tmp/a",
+        "https://github.com/octo/widget/extra",
+        "https://github.com//widget",
+        "git://github.com/octo/widget.git",
+        "file:///tmp/widget.git",
+        "/tmp/widget.git",
         "git@github.com:/octo/widget",
     ] {
         assert_eq!(parse_github_remote(url), None, "{url}");
     }
-    assert_eq!(
-        parse_github_remote("https://GitHub.com/Octo/Widget.GIT"),
-        Some(("Octo".into(), "Widget".into()))
-    );
 }
 
 #[test]
-fn remote_for_matches_real_remotes_and_no_remotes() {
+fn remote_for_matches_real_remotes() {
     let fixture = FixtureRepo::new();
     let clone = fixture.clone("clone");
     let git = fixture.git(&clone);
@@ -49,11 +67,27 @@ fn remote_for_matches_real_remotes_and_no_remotes() {
         &clone,
         ["remote", "add", "a", "https://github.com/OCTO/Widget"],
     );
-    assert_eq!(git.remote_for("octo", "widget").unwrap().name, "origin");
+    fixture.run(
+        &clone,
+        [
+            "remote",
+            "add",
+            "fork",
+            "https://github.com/octo/widget-fork",
+        ],
+    );
+    assert_eq!(git.remote_for("OCTO", "Widget").unwrap().name, "origin");
     fixture.run(&clone, ["remote", "remove", "origin"]);
     assert_eq!(git.remote_for("octo", "widget").unwrap().name, "a");
     fixture.run(&clone, ["remote", "remove", "a"]);
     fixture.run(&clone, ["remote", "remove", "z"]);
+    fixture.run(&clone, ["remote", "add", "gh", "gh:octo/widget"]);
+    fixture.run(
+        &clone,
+        ["config", "url.https://github.com/.insteadOf", "gh:"],
+    );
+    assert_eq!(git.remote_for("octo", "widget").unwrap().name, "gh");
+    fixture.run(&clone, ["remote", "remove", "gh"]);
     assert_eq!(
         git.remote_for("octo", "widget").unwrap_err().code(),
         "not_in_clone"
@@ -64,14 +98,24 @@ fn remote_for_matches_real_remotes_and_no_remotes() {
 fn discover_finds_toplevel_and_common_dir() {
     let fixture = FixtureRepo::new();
     let clone = fixture.clone("clone");
-    fs::create_dir_all(clone.join("sub")).unwrap();
+    fs::create_dir_all(clone.join("sub/dir")).unwrap();
     let top = fixture.git(&clone).discover().unwrap();
-    let sub = fixture.git(clone.join("sub")).discover().unwrap();
+    let sub = fixture.git(clone.join("sub/dir")).discover().unwrap();
     assert_eq!(top, sub);
     assert!(top.toplevel.is_absolute());
+    assert_eq!(top.toplevel, fs::canonicalize(&clone).unwrap());
     assert_eq!(
         top.common_dir,
         fs::canonicalize(clone.join(".git")).unwrap()
+    );
+    let linked = fixture.path().join("linked");
+    fixture.run(
+        &clone,
+        ["worktree", "add", "--detach", linked.to_str().unwrap()],
+    );
+    assert_eq!(
+        fixture.git(&linked).discover().unwrap().common_dir,
+        top.common_dir
     );
     assert_eq!(
         fixture.git(fixture.path()).discover().unwrap_err().code(),
@@ -100,6 +144,10 @@ fn fetch_pr_head_and_base() {
         git.resolve_commit("refs/prguide/7/fetch/head").unwrap(),
         initial
     );
+    assert_eq!(
+        git.resolve_commit("refs/prguide/7/fetch/base").unwrap(),
+        initial
+    );
     assert!(git.resolve_commit("refs/tags/hidden").is_err());
     fixture.write("new", "x");
     let next = fixture.commit("next");
@@ -115,6 +163,7 @@ fn fetch_pr_head_and_base() {
             .to_string()
             .contains("refs/pull/99/head")
     );
+    git.fetch("origin", &[]).unwrap();
 }
 
 #[test]
@@ -123,41 +172,87 @@ fn write_verify_delete_refs() {
     let clone = fixture.clone("clone");
     let git = fixture.git(&clone);
     let sha = git.resolve_commit("HEAD").unwrap();
-    let refs = vec![
-        ("refs/prguide/7/a".into(), sha.clone()),
-        ("refs/prguide/7/b".into(), sha.clone()),
-    ];
+    let refs = (0..4)
+        .map(|n| (format!("refs/prguide/7/v1/{n}"), sha.clone()))
+        .collect::<Vec<_>>();
+    git.write_refs(&refs).unwrap();
     git.write_refs(&refs).unwrap();
     assert!(git.verify_refs(&refs).unwrap().is_empty());
-    fixture.run(&clone, ["update-ref", "refs/prguide/7/a", &"0".repeat(40)]);
-    let mismatch = git.verify_refs(&refs).unwrap();
-    assert_eq!(mismatch.len(), 1);
-    assert_eq!(mismatch[0].name, "refs/prguide/7/a");
+    fixture.write("different", "value");
+    let actual = fixture.commit("actual");
+    fixture.push("main");
+    fixture.run(&clone, ["fetch", "origin", "main"]);
+    fixture.run(&clone, ["update-ref", &refs[0].0, &actual]);
+    fixture.run(&clone, ["update-ref", "-d", &refs[1].0]);
     assert_eq!(
-        git.write_refs(&[("refs/heads/main".into(), sha.clone())])
-            .unwrap_err()
-            .code(),
-        "invalid_ref"
+        git.verify_refs(&refs).unwrap(),
+        vec![
+            prguide::git::RefMismatch {
+                name: refs[0].0.clone(),
+                expected: sha.clone(),
+                actual: Some(actual)
+            },
+            prguide::git::RefMismatch {
+                name: refs[1].0.clone(),
+                expected: sha.clone(),
+                actual: None
+            },
+        ]
     );
+    let names = refs.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+    git.delete_refs(&names).unwrap();
+    git.delete_refs(&names).unwrap();
+    assert!(git.list_refs("refs/prguide/7/").unwrap().is_empty());
+}
+
+#[test]
+fn write_refs_is_atomic_and_guarded() {
+    let fixture = FixtureRepo::new();
+    let clone = fixture.clone("clone");
+    let git = fixture.git(&clone);
+    let sha = git.resolve_commit("HEAD").unwrap();
     assert_eq!(
-        git.write_refs(&[("refs/prguide/7/x".into(), "A".repeat(40))])
-            .unwrap_err()
-            .code(),
-        "invalid_ref"
-    );
-    assert!(
         git.write_refs(&[
-            ("refs/prguide/7/good".into(), sha),
+            ("refs/prguide/7/good".into(), sha.clone()),
             ("refs/prguide/7/bad".into(), "f".repeat(40))
         ])
-        .is_err()
+        .unwrap_err()
+        .code(),
+        "git_failed"
     );
-    assert!(git.list_refs("refs/prguide/7/good").unwrap().is_empty());
-    git.delete_refs(&refs.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>())
-        .unwrap();
-    git.delete_refs(&refs.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>())
-        .unwrap();
     assert!(git.list_refs("refs/prguide/7/").unwrap().is_empty());
+    for bad in [
+        "refs/heads/main",
+        "refs/prguidex/1",
+        "refs/prguide/7/a b",
+        "refs/prguide/7/x\nupdate refs/heads/main deadbeef",
+    ] {
+        let valid = "refs/prguide/7/valid".to_owned();
+        assert_eq!(
+            git.write_refs(&[(valid.clone(), sha.clone()), (bad.into(), sha.clone())])
+                .unwrap_err()
+                .code(),
+            "invalid_ref"
+        );
+        assert!(git.list_refs(&valid).unwrap().is_empty());
+        git.write_refs(&[(valid.clone(), sha.clone())]).unwrap();
+        assert_eq!(
+            git.delete_refs(&[valid.clone(), bad.into()])
+                .unwrap_err()
+                .code(),
+            "invalid_ref"
+        );
+        assert_eq!(git.resolve_commit(&valid).unwrap(), sha);
+        git.delete_refs(&[valid]).unwrap();
+    }
+    for invalid in ["abc", &"A".repeat(40)] {
+        assert_eq!(
+            git.write_refs(&[("refs/prguide/7/x".into(), invalid.into())])
+                .unwrap_err()
+                .code(),
+            "invalid_ref"
+        );
+    }
 }
 
 #[test]
@@ -182,6 +277,7 @@ fn gc_prune_keeps_pinned_objects() {
     fixture.run(&clone, ["reflog", "expire", "--expire=now", "--all"]);
     fixture.run(&clone, ["gc", "--prune=now"]);
     fixture.run(&clone, ["cat-file", "-e", &pinned]);
+    fixture.run(&clone, ["cat-file", "-e", &format!("{pinned}:p")]);
     assert!(
         fixture
             .git(&clone)
@@ -193,165 +289,31 @@ fn gc_prune_keeps_pinned_objects() {
 #[test]
 fn show_reads_blobs() {
     let fixture = FixtureRepo::new();
-    let root = fixture.head();
-    fixture.branch("feature");
-    fixture.checkout("feature");
+    fixture.write("text", "text\n");
     fixture.write("bin", b"a\0b");
-    let feature = fixture.commit("feature");
-    fixture.checkout("main");
-    fixture.write("main", "x");
-    let main = fixture.commit("main");
-    let merge = fixture.merge("feature", "merge");
-    fixture.push("main");
-    let clone = fixture.clone("clone");
-    let git = fixture.git(&clone);
-    assert_eq!(git.show(&feature, "bin").unwrap(), Some(b"a\0b".to_vec()));
-    assert_eq!(git.show(&feature, "none").unwrap(), None);
-    assert_eq!(git.merge_base(&main, &feature).unwrap(), Some(root));
-    assert_eq!(git.rev_parents(&merge).unwrap(), vec![main, feature]);
-    assert_eq!(git.resolve_commit("main").unwrap(), merge);
-}
-
-#[test]
-fn diff_spec_args_are_fixed() {
-    let spec = DiffSpec::TwoDot {
-        from: "a".into(),
-        to: "b".into(),
-        paths: vec!["x".into()],
-    };
-    assert_eq!(
-        spec.args(),
-        vec![
-            "-c",
-            "diff.suppressBlankEmpty=false",
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-color",
-            "-M",
-            "-U3",
-            "--src-prefix=a/",
-            "--dst-prefix=b/",
-            "--no-relative",
-            "--inter-hunk-context=0",
-            "-O/dev/null",
-            "--submodule=short",
-            "--ignore-submodules=none",
-            "--diff-algorithm=myers",
-            "--indent-heuristic",
-            "a..b",
-            "--",
-            "x"
-        ]
-    );
-}
-
-#[test]
-fn diff_ignores_user_diff_config() {
-    let fixture = FixtureRepo::new();
-    let from = fixture.head();
-    fixture.write("top", "one\n\nold\n");
-    fixture.write("sub/in", "x\n");
-    let to = fixture.commit("change");
+    fixture.write("dir/file", "x");
+    fixture.write("st*r.txt", "literal");
+    fixture.write("stars.txt", "wild");
+    let sha = fixture.commit("files");
+    fixture.gitlink("link", &sha);
+    let sha = fixture.commit("link");
     fixture.push("main");
     let clone = fixture.clone("clone");
     fs::create_dir_all(clone.join("sub")).unwrap();
-    let spec = DiffSpec::TwoDot {
-        from,
-        to,
-        paths: vec![],
-    };
-    let baseline = fixture.git(&clone).diff(&spec).unwrap();
-    fixture.run(&clone, ["config", "diff.noprefix", "true"]);
-    fixture.run(&clone, ["config", "diff.suppressBlankEmpty", "true"]);
-    fixture.run(&clone, ["config", "diff.interHunkContext", "10"]);
-    fixture.run(&clone, ["config", "diff.relative", "true"]);
-    fixture.run(&clone, ["config", "diff.renames", "false"]);
+    let git = fixture.git(clone.join("sub"));
+    assert_eq!(git.show(&sha, "text").unwrap(), Some(b"text\n".to_vec()));
+    assert_eq!(git.show(&sha, "bin").unwrap(), Some(b"a\0b".to_vec()));
+    assert_eq!(git.show(&sha, "missing").unwrap(), None);
+    assert_eq!(git.show(&sha, "dir").unwrap(), None);
+    assert_eq!(git.show(&sha, "link").unwrap(), None);
     assert_eq!(
-        baseline,
-        fixture.git(clone.join("sub")).diff(&spec).unwrap()
-    );
-}
-
-#[test]
-fn runner_reports_failures_ignores_git_dir_and_null_stdin() {
-    let fixture = FixtureRepo::new();
-    let clone = fixture.clone("clone");
-    let other = FixtureRepo::new();
-    let other_clone = other.clone("other");
-    other.write("x", "x");
-    other.commit("x");
-    let git = fixture.git(&clone);
-    assert!(
-        git.run(["no-such-command"])
-            .unwrap_err()
-            .to_string()
-            .contains("no-such-command")
+        git.show(&sha, "st*r.txt").unwrap(),
+        Some(b"literal".to_vec())
     );
     assert_eq!(
-        git.clone()
-            .env("GIT_DIR", other_clone.join(".git"))
-            .resolve_commit("HEAD")
-            .unwrap(),
-        git.resolve_commit("HEAD").unwrap()
+        git.show(&"0".repeat(40), "text").unwrap_err().code(),
+        "git_failed"
     );
-    assert_eq!(
-        git.run(["hash-object", "--stdin"]).unwrap(),
-        b"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\n"
-    );
-}
-
-#[test]
-fn list_refs_boundaries_and_guards() {
-    let fixture = FixtureRepo::new();
-    let clone = fixture.clone("clone");
-    let git = fixture.git(&clone);
-    let sha = git.resolve_commit("HEAD").unwrap();
-    git.write_refs(&[
-        ("refs/prguide/7/b".into(), sha.clone()),
-        ("refs/prguide/7/a".into(), sha.clone()),
-        ("refs/prguide/70/x".into(), sha),
-    ])
-    .unwrap();
-    assert_eq!(
-        git.list_refs("refs/prguide/7/")
-            .unwrap()
-            .iter()
-            .map(|x| x.0.as_str())
-            .collect::<Vec<_>>(),
-        vec!["refs/prguide/7/a", "refs/prguide/7/b"]
-    );
-    assert!(git.list_refs("refs/prguide/7*").unwrap().is_empty());
-    assert_eq!(git.list_refs("").unwrap_err().code(), "invalid_ref");
-    assert!(git.verify_refs(&[]).unwrap().is_empty());
-    assert_eq!(
-        git.env("PATH", fixture.path())
-            .resolve_commit("HEAD")
-            .unwrap_err()
-            .code(),
-        "git_missing"
-    );
-}
-
-#[test]
-fn git_error_codes_are_stable() {
-    assert_eq!(GitError::Missing.code(), "git_missing");
-}
-
-#[test]
-fn write_refs_is_atomic_and_guarded() {
-    let fixture = FixtureRepo::new();
-    let clone = fixture.clone("clone");
-    let git = fixture.git(&clone);
-    let sha = git.resolve_commit("HEAD").unwrap();
-    assert!(
-        git.write_refs(&[
-            ("refs/prguide/7/good".into(), sha),
-            ("refs/prguide/7/bad".into(), "f".repeat(40)),
-        ])
-        .is_err()
-    );
-    assert!(git.list_refs("refs/prguide/7/").unwrap().is_empty());
 }
 
 #[test]
@@ -365,35 +327,272 @@ fn merge_base_and_parents() {
     fixture.checkout("main");
     fixture.write("main", "x");
     let main = fixture.commit("main");
+    let merge = fixture.merge("feature", "merge");
+    let git = fixture.git(fixture.work_path());
+    assert_eq!(git.merge_base(&main, &feature).unwrap(), Some(root.clone()));
+    assert_eq!(git.rev_parents(&root).unwrap(), Vec::<String>::new());
+    assert_eq!(git.rev_parents(&main).unwrap(), vec![root.clone()]);
+    assert_eq!(git.rev_parents(&merge).unwrap(), vec![main, feature]);
+    assert_eq!(git.resolve_commit("main").unwrap(), merge);
+    fixture.run(fixture.work_path(), ["checkout", "--orphan", "orphan"]);
+    fixture.run(fixture.work_path(), ["rm", "-rf", "."]);
+    fixture.write("orphan", "x");
+    let orphan = fixture.commit("orphan");
+    assert_eq!(git.merge_base("main", &orphan).unwrap(), None);
+}
+
+fn expected_args(revision: &str, paths: &[&str]) -> Vec<String> {
+    [
+        "-c",
+        "diff.suppressBlankEmpty=false",
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "-M",
+        "-U3",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "--no-relative",
+        "--inter-hunk-context=0",
+        "-O/dev/null",
+        "--submodule=short",
+        "--ignore-submodules=none",
+        "--diff-algorithm=myers",
+        "--indent-heuristic",
+    ]
+    .into_iter()
+    .map(String::from)
+    .chain([revision, "--"].into_iter().map(String::from))
+    .chain(paths.iter().map(|s| (*s).into()))
+    .collect()
+}
+
+#[test]
+fn diff_spec_args_are_fixed() {
     assert_eq!(
-        fixture
-            .git(fixture.work_path())
-            .merge_base(&main, &feature)
-            .unwrap(),
-        Some(root)
+        DiffSpec::TwoDot {
+            from: "a".into(),
+            to: "b".into(),
+            paths: vec!["x".into()]
+        }
+        .args(),
+        expected_args("a..b", &["x"])
+    );
+    assert_eq!(
+        DiffSpec::ThreeDot {
+            base_tip: "a".into(),
+            head: "b".into(),
+            paths: vec![]
+        }
+        .args(),
+        expected_args("a...b", &[])
     );
 }
 
 #[test]
 fn three_dot_and_two_dot_diffs() {
     let fixture = FixtureRepo::new();
-    let from = fixture.head();
-    fixture.write("added", "x");
-    let to = fixture.commit("feature");
+    fixture.write("delete", "gone");
+    fixture.write("rename_source", "x");
+    let base = fixture.commit("base");
+    fixture.branch("feature");
+    fixture.checkout("feature");
+    fixture.write("feature", "x");
+    let feature = fixture.commit("feature");
+    fixture.checkout("main");
+    fixture.write("main", "x");
+    let main = fixture.commit("main");
+    fixture.checkout("main");
     fixture.push("main");
+    fixture.checkout("feature");
+    fixture.rename("rename_source", "renamed");
+    fixture.remove("delete");
+    let with_delete = fixture.commit("rename");
+    fixture.set_executable("renamed", true);
+    fixture.write("bin", b"a\0b");
+    fixture.write("ü.txt", "utf8");
+    fixture.gitlink("link", &base);
+    let end = fixture.commit("details");
+    fixture.push("feature");
     let clone = fixture.clone("clone");
-    let output = String::from_utf8(
-        fixture
-            .git(&clone)
-            .diff(&DiffSpec::TwoDot {
-                from,
-                to,
-                paths: vec![],
-            })
-            .unwrap(),
+    fixture.run(&clone, ["fetch", "origin", "feature"]);
+    let git = fixture.git(&clone);
+    let three = String::from_utf8(
+        git.diff(&DiffSpec::ThreeDot {
+            base_tip: main.clone(),
+            head: end.clone(),
+            paths: vec![],
+        })
+        .unwrap(),
     )
     .unwrap();
-    assert!(output.contains("new file mode"));
+    let two = String::from_utf8(
+        git.diff(&DiffSpec::TwoDot {
+            from: main,
+            to: end.clone(),
+            paths: vec![],
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(three.contains("renamed"));
+    assert!(two.contains("main"));
+    let renamed = String::from_utf8(
+        git.diff(&DiffSpec::TwoDot {
+            from: feature,
+            to: with_delete.clone(),
+            paths: vec![],
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let detailed = String::from_utf8(
+        git.diff(&DiffSpec::TwoDot {
+            from: with_delete,
+            to: end,
+            paths: vec!["renamed".into()],
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(renamed.contains("rename from") && renamed.contains("rename to"));
+    assert!(detailed.contains("old mode") && detailed.contains("new mode"));
+    assert!(
+        three.contains("deleted file mode")
+            && three.contains("Binary files")
+            && three.contains("Subproject commit")
+            && three.contains("diff --git a/ü.txt b/ü.txt")
+    );
+}
+
+#[test]
+fn diff_ignores_user_diff_config() {
+    let fixture = FixtureRepo::new();
+    let from = fixture.head();
+    fixture.write("top", "one\n\nold\n1\n2\n3\n4\n5\n6\nold2\n");
+    fixture.write("sub/in", "x\n");
+    fixture.write("rename", "r\n");
+    let before_link = fixture.commit("before");
+    fixture.rename("rename", "renamed");
+    fixture.write("top", "one\n\nnew\n1\n2\n3\n4\n5\n6\nnew2\n");
+    fixture.gitlink("link", &from);
+    let to = fixture.commit("after");
+    fixture.push("main");
+    let clone = fixture.clone("clone");
+    fs::create_dir_all(clone.join("sub")).unwrap();
+    fs::write(clone.join("order"), "sub/in\ntop\n").unwrap();
+    let spec = DiffSpec::TwoDot {
+        from: before_link,
+        to,
+        paths: vec![],
+    };
+    let baseline = fixture.git(&clone).diff(&spec).unwrap();
+    for (key, value) in [
+        ("diff.noprefix", "true"),
+        ("diff.suppressBlankEmpty", "true"),
+        ("diff.interHunkContext", "10"),
+        ("diff.orderFile", "order"),
+        ("diff.relative", "true"),
+        ("diff.submodule", "log"),
+        ("diff.ignoreSubmodules", "all"),
+        ("diff.external", "false"),
+        ("color.ui", "always"),
+        ("diff.renames", "false"),
+        ("diff.algorithm", "histogram"),
+        ("diff.indentHeuristic", "false"),
+    ] {
+        fixture.run(&clone, ["config", key, value]);
+    }
+    assert_eq!(
+        baseline,
+        fixture.git(clone.join("sub")).diff(&spec).unwrap()
+    );
+}
+
+#[test]
+fn runner_reports_failures_and_ignores_git_dir() {
+    let fixture = FixtureRepo::new();
+    let clone = fixture.clone("clone");
+    let other = FixtureRepo::new();
+    other.write("x", "x");
+    other.commit("x");
+    other.push("main");
+    let other_clone = other.clone("other");
+    let git = fixture.git(&clone);
+    let clone_head = git.resolve_commit("HEAD").unwrap();
+    assert_ne!(
+        other.git(&other_clone).resolve_commit("HEAD").unwrap(),
+        clone_head
+    );
+    let error = git.run(["no-such-command"]).unwrap_err();
+    assert_eq!(error.code(), "git_failed");
+    assert!(error.to_string().contains("no-such-command"));
+    assert_eq!(
+        git.clone()
+            .env("GIT_DIR", other_clone.join(".git"))
+            .resolve_commit("HEAD")
+            .unwrap(),
+        clone_head
+    );
+}
+
+#[test]
+fn null_stdin_is_not_inherited_child() {
+    if let Ok(dir) = env::var("PRGUIDE_NULL_STDIN_CHILD") {
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(Git::new(dir).run(["hash-object", "--stdin"]));
+        });
+        let result = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("git inherited stdin instead of receiving null stdin")
+            .unwrap();
+        assert_eq!(result, b"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\n");
+        return;
+    }
+    let fixture = FixtureRepo::new();
+    let clone = fixture.clone("clone");
+    let status = Command::new(env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "null_stdin_is_not_inherited_child",
+            "--nocapture",
+        ])
+        .env("PRGUIDE_NULL_STDIN_CHILD", clone)
+        .stdin(Stdio::piped())
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[test]
+fn list_refs_boundaries_and_guards() {
+    let fixture = FixtureRepo::new();
+    let clone = fixture.clone("clone");
+    let git = fixture.git(&clone);
+    let sha = git.resolve_commit("HEAD").unwrap();
+    git.write_refs(&[
+        ("refs/prguide/7/b".into(), sha.clone()),
+        ("refs/prguide/7/a".into(), sha.clone()),
+        ("refs/prguide/70/x".into(), sha.clone()),
+    ])
+    .unwrap();
+    for prefix in ["refs/prguide/7", "refs/prguide/7/"] {
+        assert_eq!(
+            git.list_refs(prefix)
+                .unwrap()
+                .into_iter()
+                .map(|x| x.0)
+                .collect::<Vec<_>>(),
+            vec!["refs/prguide/7/a", "refs/prguide/7/b"]
+        );
+    }
+    assert!(git.list_refs("refs/prguide/7*").unwrap().is_empty());
+    for prefix in ["", "heads/"] {
+        assert_eq!(git.list_refs(prefix).unwrap_err().code(), "invalid_ref");
+    }
+    assert!(git.verify_refs(&[]).unwrap().is_empty());
 }
 
 #[test]
@@ -410,7 +609,6 @@ fn missing_git_binary_is_git_missing() {
         "git_missing"
     );
 }
-
 #[test]
 fn remote_for_without_remotes() {
     let fixture = FixtureRepo::new();
@@ -425,7 +623,6 @@ fn remote_for_without_remotes() {
         "not_in_clone"
     );
 }
-
 #[test]
 fn diff_path_filter_from_subdirectory() {
     let fixture = FixtureRepo::new();
