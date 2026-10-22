@@ -1,3 +1,4 @@
-//! Shared integration-test support, filled by T2-2.
+//! Shared integration-test support.
+#![allow(dead_code)]
 
 pub mod fixture_repo;
