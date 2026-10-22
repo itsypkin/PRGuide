@@ -1,6 +1,6 @@
 mod support;
 
-use prguide::git::{DiffSpec, Git, GitError, Refspec, parse_github_remote};
+use prguide::git::{parse_github_remote, DiffSpec, Git, Refspec};
 use std::{
     env, fs,
     process::{Command, Stdio},
