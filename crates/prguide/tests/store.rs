@@ -390,6 +390,20 @@ fn tx_commits_rolls_back_and_data_version_tracks_other_connection() -> Result<()
 }
 
 #[test]
+fn tx_returns_store_sqlite_when_another_writer_holds_the_lock() -> Result<(), StoreError> {
+    let temp = tempdir().expect("tempdir");
+    let mut store = Store::open_in(temp.path(), &pr())?;
+    let blocker = Connection::open(store.dir().join("store.db"))?;
+    blocker.execute_batch("BEGIN IMMEDIATE")?;
+    let error = store
+        .tx(|_| Ok::<(), StoreError>(()))
+        .expect_err("the lock prevents an immediate transaction");
+    assert_eq!(error.code(), "store_sqlite");
+    blocker.execute_batch("ROLLBACK")?;
+    Ok(())
+}
+
+#[test]
 fn paths_home_and_error_contracts_are_stable() -> Result<(), StoreError> {
     for bad in ["", ".", "..", "a/b", "a..b", "/", "a\0b"] {
         assert_eq!(
