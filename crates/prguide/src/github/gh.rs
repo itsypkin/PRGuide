@@ -123,13 +123,18 @@ pub(crate) fn map_failure(
     stderr: &str,
     not_found: GitHubError,
 ) -> GitHubError {
-    let stderr = clean_stderr(stderr);
+    let cleaned_stderr = clean_stderr(stderr);
     if status == Some(4) || stderr.contains("(HTTP 401)") {
-        GitHubError::GhUnauthenticated { stderr }
+        GitHubError::GhUnauthenticated {
+            stderr: cleaned_stderr,
+        }
     } else if stderr.contains("(HTTP 404)") {
         not_found
     } else {
-        GitHubError::GhFailed { status, stderr }
+        GitHubError::GhFailed {
+            status,
+            stderr: cleaned_stderr,
+        }
     }
 }
 
@@ -272,9 +277,27 @@ mod tests {
                 ..
             }
         ));
-        let signal = map_failure(None, "other", missing);
+        let signal = map_failure(None, "other", missing.clone());
         assert!(matches!(signal, GitHubError::GhFailed { status: None, .. }));
         assert!(signal.to_string().contains("exit signal"));
+        let long_404 = format!("{}gh: Not Found (HTTP 404)", "x".repeat(2500));
+        assert_eq!(
+            map_failure(Some(1), &long_404, missing.clone()),
+            missing.clone()
+        );
+        let long_401 = format!("{}gh: Bad credentials (HTTP 401)", "x".repeat(2500));
+        assert!(matches!(
+            map_failure(Some(1), &long_401, missing.clone()),
+            GitHubError::GhUnauthenticated { ref stderr } if stderr.len() == 2003 && stderr.ends_with('…')
+        ));
+        let conflicting_summaries = format!(
+            "{}(HTTP 404)gh: Bad credentials (HTTP 401)",
+            "x".repeat(2500)
+        );
+        assert!(matches!(
+            map_failure(Some(1), &conflicting_summaries, missing),
+            GitHubError::GhUnauthenticated { ref stderr } if stderr.len() == 2003 && stderr.ends_with('…')
+        ));
         let cleaned = clean_stderr(&"x".repeat(2500));
         assert_eq!(cleaned.len(), 2003);
         assert!(cleaned.ends_with('…'));
