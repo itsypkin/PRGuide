@@ -33,6 +33,28 @@ fn objects(store: &mut Store) -> Result<Vec<(String, String)>, StoreError> {
     })
 }
 
+fn expected_objects() -> Vec<(String, String)> {
+    vec![
+        ("index".into(), "events_open".into()),
+        ("index".into(), "one_active_run".into()),
+        ("index".into(), "one_open_post".into()),
+        ("table".into(), "deepdive_sections".into()),
+        ("table".into(), "deepdives".into()),
+        ("table".into(), "drafts".into()),
+        ("table".into(), "events".into()),
+        ("table".into(), "gh_threads".into()),
+        ("table".into(), "guide_versions".into()),
+        ("table".into(), "messages".into()),
+        ("table".into(), "notices".into()),
+        ("table".into(), "outbox_items".into()),
+        ("table".into(), "posts".into()),
+        ("table".into(), "runs".into()),
+        ("table".into(), "sqlite_sequence".into()),
+        ("table".into(), "store_meta".into()),
+        ("table".into(), "threads".into()),
+    ]
+}
+
 fn insert_version(
     tx: &rusqlite::Transaction<'_>,
     version: i64,
@@ -65,28 +87,7 @@ fn fresh_store_reaches_version_1_with_exact_objects() -> Result<(), StoreError> 
             .map_err(StoreError::from)
     })?;
     assert_eq!(version, 1);
-    assert_eq!(
-        objects(&mut store)?,
-        vec![
-            ("index".into(), "events_open".into()),
-            ("index".into(), "one_active_run".into()),
-            ("index".into(), "one_open_post".into()),
-            ("table".into(), "deepdive_sections".into()),
-            ("table".into(), "deepdives".into()),
-            ("table".into(), "drafts".into()),
-            ("table".into(), "events".into()),
-            ("table".into(), "gh_threads".into()),
-            ("table".into(), "guide_versions".into()),
-            ("table".into(), "messages".into()),
-            ("table".into(), "notices".into()),
-            ("table".into(), "outbox_items".into()),
-            ("table".into(), "posts".into()),
-            ("table".into(), "runs".into()),
-            ("table".into(), "sqlite_sequence".into()),
-            ("table".into(), "store_meta".into()),
-            ("table".into(), "threads".into()),
-        ],
-    );
+    assert_eq!(objects(&mut store)?, expected_objects());
     Ok(())
 }
 
@@ -404,6 +405,33 @@ fn tx_returns_store_sqlite_when_another_writer_holds_the_lock() -> Result<(), St
 }
 
 #[test]
+fn tx_returns_store_sqlite_when_commit_fails() -> Result<(), StoreError> {
+    let temp = tempdir().expect("tempdir");
+    let mut store = Store::open_in(temp.path(), &pr())?;
+    let error = store
+        .tx(|tx| {
+            tx.execute_batch("PRAGMA defer_foreign_keys = ON")?;
+            tx.execute(
+                "INSERT INTO messages VALUES ('deferred','missing','reviewer','body','t')",
+                [],
+            )?;
+            Ok::<_, StoreError>(())
+        })
+        .expect_err("the deferred foreign key prevents commit");
+    assert_eq!(error.code(), "store_sqlite");
+    let count: i64 = store.tx(|tx| {
+        tx.query_row(
+            "SELECT count(*) FROM messages WHERE id = 'deferred'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::from)
+    })?;
+    assert_eq!(count, 0);
+    Ok(())
+}
+
+#[test]
 fn paths_home_and_error_contracts_are_stable() -> Result<(), StoreError> {
     for bad in ["", ".", "..", "a/b", "a..b", "/", "a\0b"] {
         assert_eq!(
@@ -557,7 +585,7 @@ fn concurrent_fresh_opens_succeed() -> Result<(), StoreError> {
                 .map_err(StoreError::from)
         })?;
         assert_eq!(version, 1);
-        assert_eq!(objects(&mut store)?.len(), 17);
+        assert_eq!(objects(&mut store)?, expected_objects());
     }
     Ok(())
 }

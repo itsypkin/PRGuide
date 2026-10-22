@@ -293,21 +293,27 @@ mod tests {
     #[test]
     fn wal_retry_returns_busy_after_deadline_and_other_errors_immediately() {
         let conn = Connection::open_in_memory().expect("in-memory database");
+        let busy_attempts = Cell::new(0);
         let busy = configure_wal_with_retry(&conn, Duration::ZERO, |_| {
+            busy_attempts.set(busy_attempts.get() + 1);
             Err(rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
                 None,
             ))
         })
         .expect_err("busy past deadline fails");
+        assert_eq!(busy_attempts.get(), 1);
         assert_eq!(busy.code(), "store_sqlite");
+        let other_attempts = Cell::new(0);
         let other = configure_wal_with_retry(&conn, Duration::from_secs(1), |_| {
+            other_attempts.set(other_attempts.get() + 1);
             Err(rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
                 None,
             ))
         })
         .expect_err("non-busy errors do not retry");
+        assert_eq!(other_attempts.get(), 1);
         assert_eq!(other.code(), "store_sqlite");
         assert!(matches!(
             other,
