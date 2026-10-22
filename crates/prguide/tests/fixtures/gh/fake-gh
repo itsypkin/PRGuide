@@ -1,0 +1,18 @@
+#!/bin/sh
+# Fake `gh` for prguide's tests. It never touches the network.
+# It appends its arguments, one per line, to $FAKE_GH_DIR/args, writes
+# $FAKE_GH_DIR/stdout and $FAKE_GH_DIR/stderr (when present) to its stdout
+# and stderr, and exits with the number in $FAKE_GH_DIR/exit (default 0).
+PATH=/usr/bin:/bin
+export PATH
+dir=${FAKE_GH_DIR:?FAKE_GH_DIR is not set}
+for arg in "$@"; do
+  printf '%s\n' "$arg"
+done >> "$dir/args"
+printf '%s\n' "${GH_FORCE_TTY-unset}" > "$dir/gh_force_tty"
+printf '%s\n' "${CLICOLOR_FORCE-unset}" > "$dir/clicolor_force"
+if [ -f "$dir/stdout" ]; then cat "$dir/stdout"; fi
+if [ -f "$dir/stderr" ]; then cat "$dir/stderr" >&2; fi
+code=0
+if [ -f "$dir/exit" ]; then code=$(cat "$dir/exit"); fi
+exit "$code"
