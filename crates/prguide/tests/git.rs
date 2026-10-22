@@ -76,9 +76,12 @@ fn remote_for_matches_real_remotes() {
             "https://github.com/octo/widget-fork",
         ],
     );
-    assert_eq!(git.remote_for("OCTO", "Widget").unwrap().name, "origin");
+    let origin = git.remote_for("OCTO", "Widget").unwrap();
+    assert_eq!(origin.name, "origin");
+    assert_eq!(origin.url, fixture.remote_path().display().to_string());
     fixture.run(&clone, ["remote", "remove", "origin"]);
-    assert_eq!(git.remote_for("octo", "widget").unwrap().name, "a");
+    let matching = git.remote_for("octo", "widget").unwrap();
+    assert_eq!(matching.name, "a");
     fixture.run(&clone, ["remote", "remove", "a"]);
     fixture.run(&clone, ["remote", "remove", "z"]);
     fixture.run(&clone, ["remote", "add", "gh", "gh:octo/widget"]);
@@ -86,7 +89,9 @@ fn remote_for_matches_real_remotes() {
         &clone,
         ["config", "url.https://github.com/.insteadOf", "gh:"],
     );
-    assert_eq!(git.remote_for("octo", "widget").unwrap().name, "gh");
+    let alias = git.remote_for("octo", "widget").unwrap();
+    assert_eq!(alias.name, "gh");
+    assert_eq!(alias.url, "https://github.com/octo/widget");
     fixture.run(&clone, ["remote", "remove", "gh"]);
     assert_eq!(
         git.remote_for("octo", "widget").unwrap_err().code(),
@@ -151,11 +156,16 @@ fn fetch_pr_head_and_base() {
     assert!(git.resolve_commit("refs/tags/hidden").is_err());
     fixture.write("new", "x");
     let next = fixture.commit("next");
-    fixture.push_pr(7, &next);
+    fixture.run(fixture.work_path(), ["checkout", "--orphan", "replacement"]);
+    fixture.run(fixture.work_path(), ["rm", "-rf", "."]);
+    fixture.write("replacement", "x");
+    let replacement = fixture.commit("replacement");
+    assert_ne!(replacement, next);
+    fixture.push_pr(7, &replacement);
     git.fetch("origin", &Refspec::for_pr(7, "main")).unwrap();
     assert_eq!(
         git.resolve_commit("refs/prguide/7/fetch/head").unwrap(),
-        next
+        replacement
     );
     assert!(
         git.fetch("origin", &Refspec::for_pr(99, "main"))
@@ -398,10 +408,10 @@ fn three_dot_and_two_dot_diffs() {
     let base = fixture.commit("base");
     fixture.branch("feature");
     fixture.checkout("feature");
-    fixture.write("feature", "x");
+    fixture.write("feature", "feature");
     let feature = fixture.commit("feature");
     fixture.checkout("main");
-    fixture.write("main", "x");
+    fixture.write("main", "main");
     let main = fixture.commit("main");
     fixture.checkout("main");
     fixture.push("main");
@@ -436,8 +446,9 @@ fn three_dot_and_two_dot_diffs() {
         .unwrap(),
     )
     .unwrap();
-    assert!(three.contains("renamed"));
-    assert!(two.contains("main"));
+    assert!(three.contains("diff --git a/rename_source b/renamed"));
+    assert!(!three.contains("diff --git a/main b/main"));
+    assert!(two.contains("diff --git a/main b/main"));
     let renamed = String::from_utf8(
         git.diff(&DiffSpec::TwoDot {
             from: feature,
@@ -458,6 +469,9 @@ fn three_dot_and_two_dot_diffs() {
     .unwrap();
     assert!(renamed.contains("rename from") && renamed.contains("rename to"));
     assert!(detailed.contains("old mode") && detailed.contains("new mode"));
+    for path in ["bin", "ü.txt", "link"] {
+        assert!(!detailed.contains(&format!("diff --git a/{path} b/{path}")));
+    }
     assert!(
         three.contains("deleted file mode")
             && three.contains("Binary files")
@@ -470,12 +484,13 @@ fn three_dot_and_two_dot_diffs() {
 fn diff_ignores_user_diff_config() {
     let fixture = FixtureRepo::new();
     let from = fixture.head();
-    fixture.write("top", "one\n\nold\n1\n2\n3\n4\n5\n6\nold2\n");
-    fixture.write("sub/in", "x\n");
+    fixture.write("top", "one\n\nold\n1\n2\n3\n4\n5\n6\n7\n8\nold2\n");
+    fixture.write("sub/in", "old\n");
     fixture.write("rename", "r\n");
     let before_link = fixture.commit("before");
     fixture.rename("rename", "renamed");
-    fixture.write("top", "one\n\nnew\n1\n2\n3\n4\n5\n6\nnew2\n");
+    fixture.write("top", "one\n\nnew\n1\n2\n3\n4\n5\n6\n7\n8\nnew2\n");
+    fixture.write("sub/in", "new\n");
     fixture.gitlink("link", &from);
     let to = fixture.commit("after");
     fixture.push("main");
@@ -528,6 +543,7 @@ fn runner_reports_failures_and_ignores_git_dir() {
     let error = git.run(["no-such-command"]).unwrap_err();
     assert_eq!(error.code(), "git_failed");
     assert!(error.to_string().contains("no-such-command"));
+    assert!(error.to_string().contains("is not a git command"));
     assert_eq!(
         git.clone()
             .env("GIT_DIR", other_clone.join(".git"))
