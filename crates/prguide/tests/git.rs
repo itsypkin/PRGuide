@@ -553,7 +553,7 @@ fn null_stdin_is_not_inherited_child() {
     }
     let fixture = FixtureRepo::new();
     let clone = fixture.clone("clone");
-    let status = Command::new(env::current_exe().unwrap())
+    let mut child = Command::new(env::current_exe().unwrap())
         .args([
             "--exact",
             "null_stdin_is_not_inherited_child",
@@ -561,8 +561,10 @@ fn null_stdin_is_not_inherited_child() {
         ])
         .env("PRGUIDE_NULL_STDIN_CHILD", clone)
         .stdin(Stdio::piped())
-        .status()
+        .spawn()
         .unwrap();
+    let _stdin = child.stdin.take().unwrap();
+    let status = child.wait().unwrap();
     assert!(status.success());
 }
 
