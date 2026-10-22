@@ -63,13 +63,22 @@ pub fn parse_github_remote(url: &str) -> Option<(String, String)> {
         }
         path
     };
-    let parts: Vec<_> = path.trim_start_matches('/').split('/').collect();
+    let path = path.strip_prefix('/').unwrap_or(path);
+    let parts: Vec<_> = path.split('/').collect();
     if parts.len() != 2 || parts.iter().any(|part| part.is_empty()) {
         return None;
     }
     let repo = parts[1]
         .strip_suffix(".git")
-        .or_else(|| parts[1].strip_suffix(".GIT"))
+        .filter(|_| parts[1].ends_with(".git"))
+        .or_else(|| {
+            parts[1]
+                .get(..parts[1].len().saturating_sub(4))
+                .filter(|_| {
+                    parts[1].len() >= 4
+                        && parts[1][parts[1].len() - 4..].eq_ignore_ascii_case(".git")
+                })
+        })
         .unwrap_or(parts[1]);
     if repo.is_empty() {
         return None;

@@ -116,6 +116,8 @@ impl Git {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         if input.is_some() {
             command.stdin(Stdio::piped());
+        } else {
+            command.stdin(Stdio::null());
         }
         let mut child = command.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -134,15 +136,14 @@ impl Git {
             let output = child
                 .wait_with_output()
                 .map_err(|e| Self::failed(&argv, "not run", e.to_string()))?;
+            if !output.status.success() {
+                return Err(Self::failed(&argv, output.status, output.stderr));
+            }
             writer
                 .join()
                 .map_err(|_| Self::failed(&argv, "not run", "stdin writer panicked"))?
                 .map_err(|e| Self::failed(&argv, "not run", e.to_string()))?;
-            if output.status.success() {
-                Ok(output.stdout)
-            } else {
-                Err(Self::failed(&argv, output.status, output.stderr))
-            }
+            Ok(output.stdout)
         } else {
             let output = child
                 .wait_with_output()
@@ -159,11 +160,13 @@ impl Git {
         let output = self
             .run(["rev-parse", "--git-common-dir", "--show-toplevel"])
             .map_err(|e| match e {
-                GitError::Failed { stderr, .. } => GitError::NotInClone(format!(
-                    "not inside a git clone ({}): {}",
-                    self.dir.display(),
-                    stderr
-                )),
+                GitError::Failed { status, stderr, .. } if status != "not run" => {
+                    GitError::NotInClone(format!(
+                        "not inside a git clone ({}): {}",
+                        self.dir.display(),
+                        stderr
+                    ))
+                }
                 other => other,
             })?;
         let text = String::from_utf8_lossy(&output);
@@ -203,7 +206,11 @@ impl Git {
     pub fn remote_for(&self, owner: &str, repo: &str) -> Result<Remote, GitError> {
         let raw = match self.run(["config", "--get-regexp", "^remote\\..*\\.url$"]) {
             Ok(v) => v,
-            Err(GitError::Failed { stderr, .. }) if stderr.is_empty() => Vec::new(),
+            Err(GitError::Failed { status, stderr, .. })
+                if status == "exit status: 1" && stderr.is_empty() =>
+            {
+                Vec::new()
+            }
             Err(e) => return Err(e),
         };
         let mut urls: std::collections::BTreeMap<String, Vec<String>> = Default::default();
@@ -264,6 +271,9 @@ impl Git {
     }
     /// Fetch forced refspecs without tags or recursive submodules.
     pub fn fetch(&self, remote: &str, refspecs: &[Refspec]) -> Result<(), GitError> {
+        if refspecs.is_empty() {
+            return Ok(());
+        }
         let mut args = vec![
             "fetch".into(),
             "--no-tags".into(),
@@ -298,7 +308,7 @@ impl Git {
         match self.run(["merge-base", a, b]) {
             Ok(v) => Ok(Some(String::from_utf8_lossy(&v).trim().into())),
             Err(GitError::Failed { status, stderr, .. })
-                if status.contains(" 1") && stderr.is_empty() =>
+                if status == "exit status: 1" && stderr.is_empty() =>
             {
                 Ok(None)
             }
