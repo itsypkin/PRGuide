@@ -108,8 +108,24 @@ fn constraints_and_foreign_keys_are_enforced() -> Result<(), StoreError> {
         tx.execute("INSERT INTO runs VALUES ('r1','active','t','t',NULL,NULL)", [])?;
         check_error(StoreError::from(tx.execute("INSERT INTO runs VALUES ('r2','active','t','t',NULL,NULL)", []).expect_err("unique")), rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE);
         check_error(StoreError::from(tx.execute("INSERT INTO runs VALUES ('r3','stopped','t','t','t','crash')", []).expect_err("check")), rusqlite::ffi::SQLITE_CONSTRAINT_CHECK);
-        tx.execute("INSERT INTO posts VALUES ('p1','in_flight','h','{}',NULL,NULL,'t','t')", [])?;
-        check_error(StoreError::from(tx.execute("INSERT INTO posts VALUES ('p2','unknown','h','{}',NULL,NULL,'t','t')", []).expect_err("partial unique")), rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE);
+        tx.execute(
+            "INSERT INTO posts VALUES ('p0','done','h','{}',NULL,NULL,'t','t')",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO posts VALUES ('p1','in_flight','h','{}',NULL,NULL,'t','t')",
+            [],
+        )?;
+        check_error(
+            StoreError::from(
+                tx.execute(
+                    "INSERT INTO posts VALUES ('p2','unknown','h','{}',NULL,NULL,'t','t')",
+                    [],
+                )
+                .expect_err("partial unique"),
+            ),
+            rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE,
+        );
         check_error(StoreError::from(tx.execute("INSERT INTO guide_versions VALUES (1,'ready','missing','a','b','full','a','b','[]','[]','t','t')", []).expect_err("foreign key")), rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY);
         Ok::<_, StoreError>(())
     })
