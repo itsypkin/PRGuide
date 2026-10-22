@@ -301,7 +301,7 @@ fn show_reads_blobs() {
     let fixture = FixtureRepo::new();
     fixture.write("text", "text\n");
     fixture.write("bin", b"a\0b");
-    fixture.write("dir/file", "x");
+    fixture.write("dir/inner", "inner");
     fixture.write("st*r.txt", "literal");
     fixture.write("stars.txt", "wild");
     let sha = fixture.commit("files");
@@ -315,6 +315,11 @@ fn show_reads_blobs() {
     assert_eq!(git.show(&sha, "bin").unwrap(), Some(b"a\0b".to_vec()));
     assert_eq!(git.show(&sha, "missing").unwrap(), None);
     assert_eq!(git.show(&sha, "dir").unwrap(), None);
+    assert_eq!(git.show(&sha, "dir/").unwrap(), None);
+    assert_eq!(
+        git.show(&sha, "dir/inner").unwrap(),
+        Some(b"inner".to_vec())
+    );
     assert_eq!(git.show(&sha, "link").unwrap(), None);
     assert_eq!(
         git.show(&sha, "st*r.txt").unwrap(),
@@ -349,17 +354,25 @@ fn merge_base_and_parents() {
     fixture.write("orphan", "x");
     let orphan = fixture.commit("orphan");
     assert_eq!(git.merge_base("main", &orphan).unwrap(), None);
+    assert_eq!(
+        git.merge_base("not-a-revision", "main").unwrap_err().code(),
+        "git_failed"
+    );
 }
 
 fn expected_args(revision: &str, paths: &[&str]) -> Vec<String> {
     [
         "-c",
         "diff.suppressBlankEmpty=false",
+        "-c",
+        "core.attributesFile=/dev/null",
         "diff",
         "--no-ext-diff",
         "--no-textconv",
         "--no-color",
         "-M",
+        "-l0",
+        "--full-index",
         "-U3",
         "--src-prefix=a/",
         "--dst-prefix=b/",
@@ -487,8 +500,12 @@ fn diff_ignores_user_diff_config() {
     fixture.write("top", "one\n\nold\n1\n2\n3\n4\n5\n6\n7\n8\nold2\n");
     fixture.write("sub/in", "old\n");
     fixture.write("rename", "r\n");
+    fixture.write("rename-two", "s\n");
+    fixture.write("attrs.json", "{\"old\": true}\n");
     let before_link = fixture.commit("before");
     fixture.rename("rename", "renamed");
+    fixture.rename("rename-two", "renamed-two");
+    fixture.write("attrs.json", "{\"new\": true}\n");
     fixture.write("top", "one\n\nnew\n1\n2\n3\n4\n5\n6\n7\n8\nnew2\n");
     fixture.write("sub/in", "new\n");
     fixture.gitlink("link", &from);
@@ -497,6 +514,8 @@ fn diff_ignores_user_diff_config() {
     let clone = fixture.clone("clone");
     fs::create_dir_all(clone.join("sub")).unwrap();
     fs::write(clone.join("order"), "sub/in\ntop\n").unwrap();
+    let global_attributes = fixture.path().join("global-attributes");
+    fs::write(&global_attributes, "*.json -diff\n").unwrap();
     let spec = DiffSpec::TwoDot {
         from: before_link,
         to,
@@ -514,6 +533,9 @@ fn diff_ignores_user_diff_config() {
         ("diff.external", "false"),
         ("color.ui", "always"),
         ("diff.renames", "false"),
+        ("diff.renameLimit", "1"),
+        ("core.abbrev", "12"),
+        ("core.attributesFile", global_attributes.to_str().unwrap()),
         ("diff.algorithm", "histogram"),
         ("diff.indentHeuristic", "false"),
     ] {
@@ -521,7 +543,11 @@ fn diff_ignores_user_diff_config() {
     }
     assert_eq!(
         baseline,
-        fixture.git(clone.join("sub")).diff(&spec).unwrap()
+        fixture
+            .git(clone.join("sub"))
+            .env("GIT_DIFF_OPTS", "--unified=0")
+            .diff(&spec)
+            .unwrap()
     );
 }
 

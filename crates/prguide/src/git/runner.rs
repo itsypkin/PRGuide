@@ -5,7 +5,7 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
     thread,
 };
 
@@ -60,7 +60,7 @@ impl Git {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        self.execute(args, None)
+        self.execute(args, None, &[])
     }
     /// Run git, supplying its standard input, and return captured stdout on success.
     pub fn run_with_stdin<I, S>(&self, args: I, stdin: &[u8]) -> Result<Vec<u8>, GitError>
@@ -68,10 +68,10 @@ impl Git {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        self.execute(args, Some(stdin))
+        self.execute(args, Some(stdin), &[])
     }
 
-    fn command<I, S>(&self, args: I) -> (Command, Vec<OsString>)
+    fn command<I, S>(&self, args: I, extra_removed_env: &[&str]) -> (Command, Vec<OsString>)
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -87,12 +87,15 @@ impl Git {
         let mut cmd = Command::new("git");
         cmd.args(&argv)
             .envs(self.envs.iter().map(|(key, value)| (key, value)));
-        for key in REMOVED_ENV {
+        for key in REMOVED_ENV
+            .into_iter()
+            .chain(extra_removed_env.iter().copied())
+        {
             cmd.env_remove(key);
         }
         (cmd, argv)
     }
-    fn failed(argv: &[OsString], status: impl ToString, stderr: impl AsRef<[u8]>) -> GitError {
+    fn failed(argv: &[OsString], status: Option<ExitStatus>, stderr: impl AsRef<[u8]>) -> GitError {
         GitError::Failed {
             command: format!(
                 "git {}",
@@ -101,18 +104,37 @@ impl Git {
                     .collect::<Vec<_>>()
                     .join(" ")
             ),
-            status: status.to_string(),
+            status: status
+                .as_ref()
+                .map_or_else(|| "not run".to_owned(), ToString::to_string),
             stderr: String::from_utf8_lossy(stderr.as_ref())
                 .trim_end()
                 .to_owned(),
+            exit_code: status.and_then(|status| status.code()),
         }
     }
-    fn execute<I, S>(&self, args: I, input: Option<&[u8]>) -> Result<Vec<u8>, GitError>
+    fn run_removing_env<I, S>(
+        &self,
+        args: I,
+        extra_removed_env: &[&str],
+    ) -> Result<Vec<u8>, GitError>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let (mut command, argv) = self.command(args);
+        self.execute(args, None, extra_removed_env)
+    }
+    fn execute<I, S>(
+        &self,
+        args: I,
+        input: Option<&[u8]>,
+        extra_removed_env: &[&str],
+    ) -> Result<Vec<u8>, GitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let (mut command, argv) = self.command(args, extra_removed_env);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         if input.is_some() {
             command.stdin(Stdio::piped());
@@ -123,35 +145,35 @@ impl Git {
             if e.kind() == std::io::ErrorKind::NotFound {
                 GitError::Missing
             } else {
-                Self::failed(&argv, "not run", e.to_string())
+                Self::failed(&argv, None, e.to_string())
             }
         })?;
         if let Some(input) = input {
             let mut pipe = child
                 .stdin
                 .take()
-                .ok_or_else(|| Self::failed(&argv, "not run", "stdin was unavailable"))?;
+                .ok_or_else(|| Self::failed(&argv, None, "stdin was unavailable"))?;
             let data = input.to_vec();
             let writer = thread::spawn(move || pipe.write_all(&data));
             let output = child
                 .wait_with_output()
-                .map_err(|e| Self::failed(&argv, "not run", e.to_string()))?;
+                .map_err(|e| Self::failed(&argv, None, e.to_string()))?;
             if !output.status.success() {
-                return Err(Self::failed(&argv, output.status, output.stderr));
+                return Err(Self::failed(&argv, Some(output.status), output.stderr));
             }
             writer
                 .join()
-                .map_err(|_| Self::failed(&argv, "not run", "stdin writer panicked"))?
-                .map_err(|e| Self::failed(&argv, "not run", e.to_string()))?;
+                .map_err(|_| Self::failed(&argv, None, "stdin writer panicked"))?
+                .map_err(|e| Self::failed(&argv, None, e.to_string()))?;
             Ok(output.stdout)
         } else {
             let output = child
                 .wait_with_output()
-                .map_err(|e| Self::failed(&argv, "not run", e.to_string()))?;
+                .map_err(|e| Self::failed(&argv, None, e.to_string()))?;
             if output.status.success() {
                 Ok(output.stdout)
             } else {
-                Err(Self::failed(&argv, output.status, output.stderr))
+                Err(Self::failed(&argv, Some(output.status), output.stderr))
             }
         }
     }
@@ -160,13 +182,15 @@ impl Git {
         let output = self
             .run(["rev-parse", "--git-common-dir", "--show-toplevel"])
             .map_err(|e| match e {
-                GitError::Failed { status, stderr, .. } if status != "not run" => {
-                    GitError::NotInClone(format!(
-                        "not inside a git clone ({}): {}",
-                        self.dir.display(),
-                        stderr
-                    ))
-                }
+                GitError::Failed {
+                    exit_code: Some(_),
+                    stderr,
+                    ..
+                } => GitError::NotInClone(format!(
+                    "not inside a git clone ({}): {}",
+                    self.dir.display(),
+                    stderr
+                )),
                 other => other,
             })?;
         let text = String::from_utf8_lossy(&output);
@@ -206,11 +230,11 @@ impl Git {
     pub fn remote_for(&self, owner: &str, repo: &str) -> Result<Remote, GitError> {
         let raw = match self.run(["config", "--get-regexp", "^remote\\..*\\.url$"]) {
             Ok(v) => v,
-            Err(GitError::Failed { status, stderr, .. })
-                if status == "exit status: 1" && stderr.is_empty() =>
-            {
-                Vec::new()
-            }
+            Err(GitError::Failed {
+                exit_code: Some(1),
+                stderr,
+                ..
+            }) if stderr.is_empty() => Vec::new(),
             Err(e) => return Err(e),
         };
         let mut urls: std::collections::BTreeMap<String, Vec<String>> = Default::default();
@@ -293,9 +317,12 @@ impl Git {
             return Ok(None);
         };
         let parts: Vec<_> = entry.splitn(2, |b| *b == b'\t').collect();
-        let Some((meta, _)) = parts.split_first() else {
+        let [meta, entry_path] = parts.as_slice() else {
             return Ok(None);
         };
+        if *entry_path != path.as_bytes() {
+            return Ok(None);
+        }
         let fields: Vec<_> = meta.split(|b| *b == b' ').collect();
         if fields.len() != 3 || fields[1] != b"blob" {
             return Ok(None);
@@ -307,11 +334,11 @@ impl Git {
     pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>, GitError> {
         match self.run(["merge-base", a, b]) {
             Ok(v) => Ok(Some(String::from_utf8_lossy(&v).trim().into())),
-            Err(GitError::Failed { status, stderr, .. })
-                if status == "exit status: 1" && stderr.is_empty() =>
-            {
-                Ok(None)
-            }
+            Err(GitError::Failed {
+                exit_code: Some(1),
+                stderr,
+                ..
+            }) if stderr.is_empty() => Ok(None),
             Err(e) => Err(e),
         }
     }
@@ -339,12 +366,13 @@ impl Git {
     /// Produce a config-independent raw git diff.
     pub fn diff(&self, spec: &DiffSpec) -> Result<Vec<u8>, GitError> {
         if spec.paths().is_empty() {
-            self.run(spec.args())
+            self.run_removing_env(spec.args(), &["GIT_DIFF_OPTS"])
         } else {
             let top = String::from_utf8_lossy(&self.run(["rev-parse", "--show-toplevel"])?)
                 .trim()
                 .to_owned();
-            self.with_dir(top).run(spec.args())
+            self.with_dir(top)
+                .run_removing_env(spec.args(), &["GIT_DIFF_OPTS"])
         }
     }
 }
@@ -402,11 +430,15 @@ impl DiffSpec {
         let mut a = vec![
             "-c".into(),
             "diff.suppressBlankEmpty=false".into(),
+            "-c".into(),
+            "core.attributesFile=/dev/null".into(),
             "diff".into(),
             "--no-ext-diff".into(),
             "--no-textconv".into(),
             "--no-color".into(),
             "-M".into(),
+            "-l0".into(),
+            "--full-index".into(),
             "-U3".into(),
             "--src-prefix=a/".into(),
             "--dst-prefix=b/".into(),

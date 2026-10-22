@@ -17,6 +17,7 @@ pub enum GitError {
         command: String,
         status: String,
         stderr: String,
+        exit_code: Option<i32>,
     },
     /// The git executable was unavailable.
     #[error("git executable not found on PATH")]
@@ -100,7 +101,8 @@ mod tests {
             GitError::Failed {
                 command: "x".into(),
                 status: "x".into(),
-                stderr: "x".into()
+                stderr: "x".into(),
+                exit_code: None,
             }
             .code(),
             "git_failed"
