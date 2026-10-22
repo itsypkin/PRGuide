@@ -172,21 +172,29 @@ impl Store {
 }
 
 fn configure_wal(conn: &Connection) -> Result<(), StoreError> {
+    configure_wal_with_retry(conn, Duration::from_secs(5), |conn| {
+        conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))
+    })
+}
+
+fn configure_wal_with_retry(
+    conn: &Connection,
+    timeout: Duration,
+    mut set_wal: impl FnMut(&Connection) -> rusqlite::Result<String>,
+) -> Result<(), StoreError> {
     let mode: String = conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
     if mode.eq_ignore_ascii_case("wal") {
         return Ok(());
     }
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + timeout;
     loop {
-        match conn
-            .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))
-        {
+        match set_wal(conn) {
             Ok(mode) => return require_pragma("journal_mode", &mode, "wal"),
             Err(error)
                 if error.sqlite_error_code() == Some(ErrorCode::DatabaseBusy)
                     && Instant::now() < deadline =>
             {
-                thread::sleep(Duration::from_millis(10))
+                thread::sleep(Duration::from_millis(10));
             }
             Err(error) => return Err(StoreError::Sqlite(error)),
         }
@@ -237,7 +245,12 @@ impl StoreError {
 
 #[cfg(test)]
 mod tests {
-    use super::require_pragma;
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    use rusqlite::{Connection, ErrorCode};
+
+    use super::{configure_wal_with_retry, require_pragma};
 
     #[test]
     fn require_pragma_checks_values() {
@@ -256,5 +269,50 @@ mod tests {
                 .code(),
             "store_sqlite"
         );
+    }
+
+    #[test]
+    fn wal_retry_retries_busy_until_the_mode_is_wal() {
+        let conn = Connection::open_in_memory().expect("in-memory database");
+        let attempts = Cell::new(0);
+        configure_wal_with_retry(&conn, Duration::from_secs(1), |_| {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() == 1 {
+                Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                    None,
+                ))
+            } else {
+                Ok("wal".to_owned())
+            }
+        })
+        .expect("retry succeeds");
+        assert_eq!(attempts.get(), 2);
+    }
+
+    #[test]
+    fn wal_retry_returns_busy_after_deadline_and_other_errors_immediately() {
+        let conn = Connection::open_in_memory().expect("in-memory database");
+        let busy = configure_wal_with_retry(&conn, Duration::ZERO, |_| {
+            Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                None,
+            ))
+        })
+        .expect_err("busy past deadline fails");
+        assert_eq!(busy.code(), "store_sqlite");
+        let other = configure_wal_with_retry(&conn, Duration::from_secs(1), |_| {
+            Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                None,
+            ))
+        })
+        .expect_err("non-busy errors do not retry");
+        assert_eq!(other.code(), "store_sqlite");
+        assert!(matches!(
+            other,
+            super::StoreError::Sqlite(ref error)
+                if error.sqlite_error_code() == Some(ErrorCode::Unknown)
+        ));
     }
 }
