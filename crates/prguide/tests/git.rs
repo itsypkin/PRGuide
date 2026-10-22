@@ -519,6 +519,51 @@ fn three_dot_and_two_dot_diffs() {
 }
 
 #[test]
+fn diff_resolves_ref_names_and_uses_head_attributes() {
+    let fixture = FixtureRepo::new();
+    fixture.write("attrs.json", "{\"old\": true}\n");
+    fixture.write(".gitattributes", "*.json -diff\n");
+    fixture.commit("base attributes");
+    fixture.write(".gitattributes", "*.json diff\n");
+    fixture.write("attrs.json", "{\"middle\": true}\n");
+    fixture.commit("head attributes override base");
+    fixture.write(".gitattributes", "*.json -diff\n");
+    fixture.write("attrs.json", "{\"new\": true}\n");
+    fixture.commit("head attributes");
+    fixture.push("main");
+    let clone = fixture.clone("clone");
+    let git = fixture.git(&clone);
+
+    let head_wins = String::from_utf8(
+        git.diff(&DiffSpec::TwoDot {
+            from: "main~2".into(),
+            to: "main~1".into(),
+            paths: vec![],
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        head_wins.contains("-{\"old\": true}") && head_wins.contains("+{\"middle\": true}"),
+        "the head commit's attributes must override base attributes: {head_wins}"
+    );
+
+    let committed_attributes = String::from_utf8(
+        git.diff(&DiffSpec::TwoDot {
+            from: "main~1".into(),
+            to: "main".into(),
+            paths: vec![],
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        committed_attributes.contains("Binary files a/attrs.json and b/attrs.json differ"),
+        "the head commit's attributes must apply: {committed_attributes}"
+    );
+}
+
+#[test]
 fn diff_ignores_user_diff_config() {
     let fixture = FixtureRepo::new();
     let from = fixture.head();
