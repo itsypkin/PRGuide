@@ -220,7 +220,17 @@ fn maps_script_errors_and_parse_errors() {
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("exit"), "1").unwrap();
     fs::write(dir.path().join("stderr"), "gh: Not Found (HTTP 404)\n").unwrap();
-    for call in [true, false] {
+    for (call, stdout) in [
+        (
+            true,
+            "{\"message\":\"Not Found\",\"documentation_url\":\"https://docs.github.com/rest/pulls/pulls#get-a-pull-request\",\"status\":\"404\"}",
+        ),
+        (
+            false,
+            "[{\"message\":\"Not Found\",\"documentation_url\":\"https://docs.github.com/rest/pulls/pulls#list-commits-on-a-pull-request\",\"status\":\"404\"}]",
+        ),
+    ] {
+        fs::write(dir.path().join("stdout"), stdout).unwrap();
         let error = if call {
             gh(&dir).pr(&repo(), 999_999_999).unwrap_err()
         } else {
@@ -243,6 +253,11 @@ fn maps_script_errors_and_parse_errors() {
     fs::write(
         dir.path().join("stderr"),
         "gh: Bad credentials (HTTP 401)\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("stdout"),
+        "{\n  \"message\": \"Bad credentials\",\n  \"documentation_url\": \"https://docs.github.com/rest\",\n  \"status\": \"401\"\n}\n",
     )
     .unwrap();
     assert!(
@@ -321,13 +336,11 @@ fn finds_gh_on_child_path_and_reports_missing_or_nonexecutable_programs() {
         14148
     );
     let plain = dir.path().join("plain");
-    fs::write(&plain, "no").unwrap();
-    assert_eq!(
-        GhCli::with_program(plain)
-            .pr(&repo(), 1)
-            .unwrap_err()
-            .code(),
-        "gh_failed"
+    fs::copy(fixture("pr-cli-14148-merged-fork.json"), &plain).unwrap();
+    let error = GhCli::with_program(plain).pr(&repo(), 1).unwrap_err();
+    assert_eq!(error.code(), "gh_failed");
+    assert!(
+        matches!(error, GitHubError::GhFailed { stderr, .. } if stderr.starts_with("failed to run"))
     );
 }
 

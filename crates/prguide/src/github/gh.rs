@@ -124,11 +124,12 @@ pub(crate) fn map_failure(
     not_found: GitHubError,
 ) -> GitHubError {
     let cleaned_stderr = clean_stderr(stderr);
-    if status == Some(4) || stderr.contains("(HTTP 401)") {
+    let summary = stderr.trim_end().lines().next_back().unwrap_or_default();
+    if status == Some(4) || summary.contains("(HTTP 401)") {
         GitHubError::GhUnauthenticated {
             stderr: cleaned_stderr,
         }
-    } else if stderr.contains("(HTTP 404)") {
+    } else if summary.contains("(HTTP 404)") {
         not_found
     } else {
         GitHubError::GhFailed {
@@ -290,13 +291,33 @@ mod tests {
             map_failure(Some(1), &long_401, missing.clone()),
             GitHubError::GhUnauthenticated { ref stderr } if stderr.len() == 2003 && stderr.ends_with('…')
         ));
-        let conflicting_summaries = format!(
-            "{}(HTTP 404)gh: Bad credentials (HTTP 401)",
+        let embedded_404_then_401 = format!(
+            "{}(HTTP 404)\ngh: Bad credentials (HTTP 401)",
             "x".repeat(2500)
         );
         assert!(matches!(
-            map_failure(Some(1), &conflicting_summaries, missing),
+            map_failure(Some(1), &embedded_404_then_401, missing.clone()),
             GitHubError::GhUnauthenticated { ref stderr } if stderr.len() == 2003 && stderr.ends_with('…')
+        ));
+        let embedded_401_then_404 =
+            format!("{}(HTTP 401)\ngh: Not Found (HTTP 404)", "x".repeat(2500));
+        assert_eq!(
+            map_failure(Some(1), &embedded_401_then_404, missing.clone()),
+            missing
+        );
+        assert!(matches!(
+            map_failure(
+                Some(1),
+                "(HTTP 404) in a response body\ngh: Server Error (HTTP 502)",
+                GitHubError::PrNotFound {
+                    repo: "a/b".into(),
+                    number: 1
+                }
+            ),
+            GitHubError::GhFailed {
+                status: Some(1),
+                ..
+            }
         ));
         let cleaned = clean_stderr(&"x".repeat(2500));
         assert_eq!(cleaned.len(), 2003);
