@@ -325,6 +325,30 @@ mod tests {
             map_failure(Some(1), &embedded_401_then_404, missing.clone()),
             missing.clone()
         );
+        assert!(matches!(
+            map_failure(
+                Some(1),
+                "gh: Bad credentials (HTTP 401)\nresponse text (HTTP 404)\n",
+                missing.clone()
+            ),
+            GitHubError::GhUnauthenticated { .. }
+        ));
+        assert_eq!(
+            map_failure(
+                Some(1),
+                "gh: Not Found (HTTP 404)\ngh: x (HTTP 4040)\n",
+                missing.clone()
+            ),
+            missing.clone()
+        );
+        assert!(matches!(
+            map_failure(
+                Some(1),
+                "gh: Bad credentials (HTTP 401)\ngh: x (HTTP abc)\n",
+                missing.clone()
+            ),
+            GitHubError::GhUnauthenticated { .. }
+        ));
         let scope_hint = "gh: This API operation needs the \"repo\" scope. To request it, run:  gh auth refresh -h github.com -s repo";
         assert_eq!(
             map_failure(
