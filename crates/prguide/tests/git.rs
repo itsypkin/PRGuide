@@ -360,6 +360,31 @@ fn merge_base_and_parents() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn merge_base_uses_numeric_exit_status() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = FixtureRepo::new();
+    let bin = fixture.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let git = bin.join("git");
+    fs::write(&git, "#!/bin/sh\nexit 2\n").unwrap();
+    let mut permissions = fs::metadata(&git).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&git, permissions).unwrap();
+
+    assert_eq!(
+        fixture
+            .git(fixture.work_path())
+            .env("PATH", bin)
+            .merge_base("a", "b")
+            .unwrap_err()
+            .code(),
+        "git_failed"
+    );
+}
+
 fn expected_args(revision: &str, paths: &[&str]) -> Vec<String> {
     [
         "-c",
@@ -531,6 +556,9 @@ fn diff_ignores_user_diff_config() {
         String::from_utf8_lossy(&baseline).contains("rename from rename"),
         "fixture must require rename detection"
     );
+    fs::create_dir_all(clone.join(".git/info")).unwrap();
+    fs::write(clone.join(".git/info/attributes"), "*.json -diff\n").unwrap();
+    fs::write(clone.join(".gitattributes"), "*.json -diff\n").unwrap();
     for (key, value) in [
         ("diff.noprefix", "true"),
         ("diff.suppressBlankEmpty", "true"),
@@ -679,8 +707,10 @@ fn remote_for_without_remotes() {
 #[test]
 fn diff_path_filter_from_subdirectory() {
     let fixture = FixtureRepo::new();
-    let from = fixture.head();
-    fixture.write("top", "changed");
+    fixture.write("top", "one\ntwo\nthree\n");
+    let from = fixture.commit("before");
+    fixture.write("top", "one\nchanged\nthree\n");
+    fixture.write("other", "changed");
     let to = fixture.commit("change");
     fixture.push("main");
     let clone = fixture.clone("clone");
@@ -692,5 +722,13 @@ fn diff_path_filter_from_subdirectory() {
     };
     let top = fixture.git(&clone).diff(&spec).unwrap();
     assert!(!top.is_empty());
-    assert_eq!(top, fixture.git(clone.join("sub")).diff(&spec).unwrap());
+    assert!(!String::from_utf8_lossy(&top).contains("diff --git a/other b/other"));
+    assert_eq!(
+        top,
+        fixture
+            .git(clone.join("sub"))
+            .env("GIT_DIFF_OPTS", "--unified=0")
+            .diff(&spec)
+            .unwrap()
+    );
 }
