@@ -124,7 +124,11 @@ pub(crate) fn map_failure(
     not_found: GitHubError,
 ) -> GitHubError {
     let cleaned_stderr = clean_stderr(stderr);
-    let summary = stderr.trim_end().lines().next_back().unwrap_or_default();
+    let summary = stderr
+        .lines()
+        .rev()
+        .find(|line| is_gh_http_summary(line))
+        .unwrap_or_default();
     if status == Some(4) || summary.contains("(HTTP 401)") {
         GitHubError::GhUnauthenticated {
             stderr: cleaned_stderr,
@@ -137,6 +141,19 @@ pub(crate) fn map_failure(
             stderr: cleaned_stderr,
         }
     }
+}
+
+fn is_gh_http_summary(line: &str) -> bool {
+    let Some(status) = line
+        .strip_prefix("gh: ")
+        .and_then(|line| line.strip_suffix(')'))
+    else {
+        return false;
+    };
+    let Some(code) = status.rsplit_once("(HTTP ").map(|(_, code)| code) else {
+        return false;
+    };
+    code.len() == 3 && code.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 pub(crate) fn clean_stderr(stderr: &str) -> String {
@@ -261,12 +278,15 @@ mod tests {
             }
         );
         assert_eq!(
-            map_failure(Some(1), "(HTTP 401)", missing.clone()),
+            map_failure(Some(1), "gh: Bad credentials (HTTP 401)", missing.clone()),
             GitHubError::GhUnauthenticated {
-                stderr: "(HTTP 401)".into()
+                stderr: "gh: Bad credentials (HTTP 401)".into()
             }
         );
-        assert_eq!(map_failure(Some(1), "(HTTP 404)", missing.clone()), missing);
+        assert_eq!(
+            map_failure(Some(1), "gh: Not Found (HTTP 404)", missing.clone()),
+            missing
+        );
         assert!(matches!(
             map_failure(Some(4), "(HTTP 404)", missing.clone()),
             GitHubError::GhUnauthenticated { .. }
@@ -281,12 +301,12 @@ mod tests {
         let signal = map_failure(None, "other", missing.clone());
         assert!(matches!(signal, GitHubError::GhFailed { status: None, .. }));
         assert!(signal.to_string().contains("exit signal"));
-        let long_404 = format!("{}gh: Not Found (HTTP 404)", "x".repeat(2500));
+        let long_404 = format!("{}\ngh: Not Found (HTTP 404)", "x".repeat(2500));
         assert_eq!(
             map_failure(Some(1), &long_404, missing.clone()),
             missing.clone()
         );
-        let long_401 = format!("{}gh: Bad credentials (HTTP 401)", "x".repeat(2500));
+        let long_401 = format!("{}\ngh: Bad credentials (HTTP 401)", "x".repeat(2500));
         assert!(matches!(
             map_failure(Some(1), &long_401, missing.clone()),
             GitHubError::GhUnauthenticated { ref stderr } if stderr.len() == 2003 && stderr.ends_with('…')
@@ -303,8 +323,40 @@ mod tests {
             format!("{}(HTTP 401)\ngh: Not Found (HTTP 404)", "x".repeat(2500));
         assert_eq!(
             map_failure(Some(1), &embedded_401_then_404, missing.clone()),
-            missing
+            missing.clone()
         );
+        let scope_hint = "gh: This API operation needs the \"repo\" scope. To request it, run:  gh auth refresh -h github.com -s repo";
+        assert_eq!(
+            map_failure(
+                Some(1),
+                &format!("gh: Not Found (HTTP 404)\n{scope_hint}\n"),
+                missing.clone()
+            ),
+            missing.clone()
+        );
+        assert!(matches!(
+            map_failure(
+                Some(1),
+                &format!("gh: Bad credentials (HTTP 401)\n{scope_hint}\n"),
+                missing.clone()
+            ),
+            GitHubError::GhUnauthenticated { .. }
+        ));
+        assert_eq!(
+            map_failure(
+                Some(1),
+                "gh: Not Found (HTTP 404)\nAuthorize in your web browser: https://github.com/orgs/x/sso?x\n",
+                missing.clone()
+            ),
+            missing.clone()
+        );
+        assert!(matches!(
+            map_failure(Some(1), " \n\t", missing.clone()),
+            GitHubError::GhFailed {
+                status: Some(1),
+                stderr
+            } if stderr.is_empty()
+        ));
         assert!(matches!(
             map_failure(
                 Some(1),
