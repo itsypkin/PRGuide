@@ -499,12 +499,17 @@ fn diff_ignores_user_diff_config() {
     let from = fixture.head();
     fixture.write("top", "one\n\nold\n1\n2\n3\n4\n5\n6\n7\n8\nold2\n");
     fixture.write("sub/in", "old\n");
-    fixture.write("rename", "r\n");
-    fixture.write("rename-two", "s\n");
+    fixture.write("rename", "a1\na2\na3\na4\na5\na6\na7\na8\na9\na10\n");
+    fixture.write("rename-two", "b1\nb2\nb3\nb4\nb5\nb6\nb7\nb8\nb9\nb10\n");
     fixture.write("attrs.json", "{\"old\": true}\n");
     let before_link = fixture.commit("before");
     fixture.rename("rename", "renamed");
     fixture.rename("rename-two", "renamed-two");
+    fixture.write("renamed", "a1\na2\na3\na4\na5\na6\na7\na8\na9\nchanged\n");
+    fixture.write(
+        "renamed-two",
+        "b1\nb2\nb3\nb4\nb5\nb6\nb7\nb8\nb9\nchanged\n",
+    );
     fixture.write("attrs.json", "{\"new\": true}\n");
     fixture.write("top", "one\n\nnew\n1\n2\n3\n4\n5\n6\n7\n8\nnew2\n");
     fixture.write("sub/in", "new\n");
@@ -522,6 +527,10 @@ fn diff_ignores_user_diff_config() {
         paths: vec![],
     };
     let baseline = fixture.git(&clone).diff(&spec).unwrap();
+    assert!(
+        String::from_utf8_lossy(&baseline).contains("rename from rename"),
+        "fixture must require rename detection"
+    );
     for (key, value) in [
         ("diff.noprefix", "true"),
         ("diff.suppressBlankEmpty", "true"),
