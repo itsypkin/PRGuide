@@ -31,8 +31,7 @@ impl GhCli {
         self.env.push((key.into(), value.into()));
         self
     }
-
-    fn api(&self, args: &[&str]) -> Result<String, GitHubError> {
+    fn api(&self, args: &[&str], not_found: GitHubError) -> Result<String, GitHubError> {
         let header = format!("X-GitHub-Api-Version: {API_VERSION}");
         let mut command = Command::new(&self.program);
         command
@@ -64,14 +63,7 @@ impl GhCli {
         })?;
         let stderr = String::from_utf8_lossy(&output.stderr);
         if !output.status.success() {
-            return Err(map_failure(
-                output.status.code(),
-                &stderr,
-                GitHubError::PrNotFound {
-                    repo: String::new(),
-                    number: 0,
-                },
-            ));
+            return Err(map_failure(output.status.code(), &stderr, not_found));
         }
         String::from_utf8(output.stdout).map_err(|error| GitHubError::GhFailed {
             status: Some(0),
@@ -80,13 +72,13 @@ impl GhCli {
     }
 
     fn api_for_pr(&self, args: &[&str], repo: &Repo, number: u64) -> Result<String, GitHubError> {
-        match self.api(args) {
-            Err(GitHubError::PrNotFound { .. }) => Err(GitHubError::PrNotFound {
+        self.api(
+            args,
+            GitHubError::PrNotFound {
                 repo: repo.to_string(),
                 number,
-            }),
-            result => result,
-        }
+            },
+        )
     }
 }
 
@@ -256,21 +248,39 @@ mod tests {
             repo: "a/b".into(),
             number: 1,
         };
+        assert_eq!(
+            map_failure(Some(4), "", missing.clone()),
+            GitHubError::GhUnauthenticated {
+                stderr: String::new()
+            }
+        );
+        assert_eq!(
+            map_failure(Some(1), "(HTTP 401)", missing.clone()),
+            GitHubError::GhUnauthenticated {
+                stderr: "(HTTP 401)".into()
+            }
+        );
+        assert_eq!(map_failure(Some(1), "(HTTP 404)", missing.clone()), missing);
         assert!(matches!(
             map_failure(Some(4), "(HTTP 404)", missing.clone()),
             GitHubError::GhUnauthenticated { .. }
         ));
-        assert_eq!(map_failure(Some(1), "(HTTP 404)", missing.clone()), missing);
         assert!(matches!(
-            map_failure(Some(1), "(HTTP 401)", missing.clone()),
-            GitHubError::GhUnauthenticated { .. }
+            map_failure(Some(1), "other", missing.clone()),
+            GitHubError::GhFailed {
+                status: Some(1),
+                ..
+            }
         ));
-        assert!(matches!(
-            map_failure(None, "other", missing),
-            GitHubError::GhFailed { status: None, .. }
-        ));
+        let signal = map_failure(None, "other", missing);
+        assert!(matches!(signal, GitHubError::GhFailed { status: None, .. }));
+        assert!(signal.to_string().contains("exit signal"));
         let cleaned = clean_stderr(&"x".repeat(2500));
         assert_eq!(cleaned.len(), 2003);
         assert!(cleaned.ends_with('…'));
+        let multibyte = format!("{}é", "x".repeat(1999));
+        assert_eq!(clean_stderr(&multibyte), "x".repeat(1999) + "…");
+        assert_eq!(clean_stderr(&"x".repeat(2000)), "x".repeat(2000));
+        assert_eq!(clean_stderr(" \n stderr \t"), "stderr");
     }
 }
