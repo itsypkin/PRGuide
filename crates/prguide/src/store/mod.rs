@@ -4,8 +4,12 @@ use std::{
     ffi::OsStr,
     fs,
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use rusqlite::{Connection, ErrorCode, TransactionBehavior};
@@ -99,10 +103,110 @@ pub fn resolve_home(
     }
 }
 
+const MAX_MILLIS: i64 = 253_402_300_799_999;
+
+/// Milliseconds since the Unix epoch, clamped to
+/// 1970-01-01T00:00:00.000Z ..= 9999-12-31T23:59:59.999Z.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Timestamp(i64);
+
+impl Timestamp {
+    /// Clamps into the supported range.
+    pub fn from_unix_millis(ms: i64) -> Self {
+        Self(ms.clamp(0, MAX_MILLIS))
+    }
+
+    pub fn unix_millis(self) -> i64 {
+        self.0
+    }
+
+    /// Adds `d` (whole milliseconds), clamping at the maximum.
+    pub fn saturating_add(self, d: Duration) -> Self {
+        let add = i64::try_from(d.as_millis()).unwrap_or(i64::MAX);
+        Self::from_unix_millis(self.0.saturating_add(add))
+    }
+
+    /// Always 24 bytes: `YYYY-MM-DDTHH:MM:SS.mmmZ`, UTC.
+    pub fn to_rfc3339(self) -> String {
+        let days = self.0.div_euclid(86_400_000);
+        let rem = self.0.rem_euclid(86_400_000);
+        // Days-from-civil inverse (Hinnant), on the clamped range.
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z.rem_euclid(146_097);
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = yoe + era * 400 + i64::from(month <= 2);
+        format!(
+            "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+            rem / 3_600_000,
+            rem / 60_000 % 60,
+            rem / 1000 % 60,
+            rem % 1000
+        )
+    }
+}
+
+impl std::fmt::Display for Timestamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_rfc3339())
+    }
+}
+
+/// Where the store reads the time.
+pub trait Clock: Send + Sync {
+    fn now(&self) -> Timestamp;
+}
+
+/// `SystemTime::now()`, truncated to milliseconds. A time before the epoch gives the epoch.
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Timestamp {
+        let ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+            .unwrap_or(0);
+        Timestamp::from_unix_millis(ms)
+    }
+}
+
+/// A clock that only moves when told to.
+pub struct FakeClock {
+    millis: AtomicI64,
+}
+
+impl FakeClock {
+    pub fn new(start: Timestamp) -> Self {
+        Self {
+            millis: AtomicI64::new(start.0),
+        }
+    }
+
+    pub fn set(&self, t: Timestamp) {
+        self.millis.store(t.0, Ordering::SeqCst);
+    }
+
+    pub fn advance(&self, d: Duration) {
+        let next = Timestamp(self.millis.load(Ordering::SeqCst)).saturating_add(d);
+        self.millis.store(next.0, Ordering::SeqCst);
+    }
+}
+
+impl Clock for FakeClock {
+    fn now(&self) -> Timestamp {
+        Timestamp(self.millis.load(Ordering::SeqCst))
+    }
+}
+
 pub struct Store {
     dir: PathBuf,
     pr: PrRef,
     conn: Connection,
+    clock: Arc<dyn Clock>,
 }
 
 impl Store {
@@ -134,7 +238,23 @@ impl Store {
             dir,
             pr: pr.clone(),
             conn,
+            clock: Arc::new(SystemClock),
         })
+    }
+
+    /// Replaces the clock (tests pass an `Arc<FakeClock>` they keep a clone of).
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// A clone of the clock, so code can read the time inside `tx`.
+    pub fn clock(&self) -> Arc<dyn Clock> {
+        Arc::clone(&self.clock)
+    }
+
+    pub fn now(&self) -> Timestamp {
+        self.clock.now()
     }
 
     /// `<home>/prs/github.com/<owner>/<repo>/<number>`.
@@ -229,6 +349,12 @@ pub enum StoreError {
     },
     #[error("store database error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("run {run_id} is active; take it over to start a new run")]
+    RunActive { run_id: String },
+    #[error("run {run_id} has stopped")]
+    RunStopped { run_id: String },
+    #[error("no run {run_id} in this store")]
+    RunUnknown { run_id: String },
 }
 
 impl StoreError {
@@ -239,6 +365,9 @@ impl StoreError {
             Self::StoreTooNew { .. } => "store_too_new",
             Self::Io { .. } => "store_io",
             Self::Sqlite(_) => "store_sqlite",
+            Self::RunActive { .. } => "run_active",
+            Self::RunStopped { .. } => "run_stopped",
+            Self::RunUnknown { .. } => "run_unknown",
         }
     }
 }
@@ -250,7 +379,81 @@ mod tests {
 
     use rusqlite::{Connection, ErrorCode};
 
-    use super::{configure_wal_with_retry, require_pragma};
+    use super::{
+        Clock, FakeClock, Timestamp, configure_wal_with_retry, require_pragma, runs::LEASE,
+    };
+
+    const T0: i64 = 1_792_713_600_000;
+
+    #[test]
+    fn timestamp_formats_fixed_width_rfc3339() {
+        for (ms, want) in [
+            (0, "1970-01-01T00:00:00.000Z"),
+            (951_868_799_999, "2000-02-29T23:59:59.999Z"),
+            (1_700_000_000_000, "2023-11-14T22:13:20.000Z"),
+            (T0, "2026-10-23T00:00:00.000Z"),
+            (4_107_542_399_999, "2100-02-28T23:59:59.999Z"),
+            (4_107_542_400_000, "2100-03-01T00:00:00.000Z"),
+            (253_402_300_799_999, "9999-12-31T23:59:59.999Z"),
+        ] {
+            let got = Timestamp::from_unix_millis(ms).to_rfc3339();
+            assert_eq!(got.len(), 24);
+            assert_eq!(got, want);
+            assert_eq!(Timestamp::from_unix_millis(ms).to_string(), want);
+        }
+    }
+
+    #[test]
+    fn timestamp_clamps_and_saturates() {
+        assert_eq!(
+            Timestamp::from_unix_millis(-1).to_rfc3339(),
+            "1970-01-01T00:00:00.000Z"
+        );
+        let max = Timestamp::from_unix_millis(i64::MAX);
+        assert_eq!(max.to_rfc3339(), "9999-12-31T23:59:59.999Z");
+        assert_eq!(max.saturating_add(Duration::from_secs(5)), max);
+        assert_eq!(max.saturating_add(Duration::MAX), max);
+        assert_eq!(
+            Timestamp::from_unix_millis(T0)
+                .saturating_add(LEASE)
+                .to_rfc3339(),
+            "2026-10-23T00:30:00.000Z"
+        );
+    }
+
+    #[test]
+    fn timestamp_text_order_is_time_order() {
+        for ms in [
+            999,
+            59_999,
+            86_399_999,
+            1_785_542_399_999,
+            1_798_761_599_999,
+            951_868_799_999,
+        ] {
+            let a = Timestamp::from_unix_millis(ms);
+            let b = Timestamp::from_unix_millis(ms + 1);
+            assert!(a < b);
+            assert!(a.to_rfc3339() < b.to_rfc3339());
+        }
+        assert_eq!(
+            Timestamp::from_unix_millis(1_798_761_600_000).to_rfc3339(),
+            "2027-01-01T00:00:00.000Z"
+        );
+    }
+
+    #[test]
+    fn fake_clock_moves_only_when_told() {
+        let clock = FakeClock::new(Timestamp::from_unix_millis(T0));
+        assert_eq!(clock.now(), clock.now());
+        clock.advance(Duration::from_secs(60));
+        assert_eq!(clock.now().unix_millis(), T0 + 60_000);
+        clock.set(Timestamp::from_unix_millis(5));
+        assert_eq!(clock.now().unix_millis(), 5);
+        clock.set(Timestamp::from_unix_millis(i64::MAX));
+        clock.advance(Duration::from_secs(1));
+        assert_eq!(clock.now().unix_millis(), 253_402_300_799_999);
+    }
 
     #[test]
     fn require_pragma_checks_values() {
