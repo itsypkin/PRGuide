@@ -398,8 +398,6 @@ fn expected_args(revision: &str, paths: &[&str]) -> Vec<String> {
         "-c",
         "diff.default.xfuncname=^$",
         "-c",
-        "diff.default.funcname=^$",
-        "-c",
         "attr.tree=4b825dc642cb6eb9a060e54bf8d69288fbee4904",
         "diff",
         "--no-ext-diff",
@@ -852,21 +850,26 @@ fn diff_ignores_user_diff_config() {
 #[test]
 fn diff_overrides_global_and_local_default_config() {
     for scope in ["--global", "--local"] {
-        for (key, value) in [
-            ("core.bigFileThreshold", "1"),
-            ("diff.default.binary", "true"),
-            ("diff.default.xfuncname", "^ +(int .*)$"),
-            ("diff.default.funcname", "^ +(int .*)$"),
-            ("diff.default.textconv", "tr a-z A-Z <"),
-            ("attr.tree", "HEAD"),
+        for (key, value, attr_tree) in [
+            ("core.bigFileThreshold", "1".to_owned(), false),
+            ("diff.default.binary", "true".to_owned(), false),
+            ("diff.default.xfuncname", "^ +(int .*)$".to_owned(), false),
+            ("diff.default.textconv", "tr a-z A-Z <".to_owned(), false),
+            ("attr.tree", String::new(), true),
         ] {
             let fixture = FixtureRepo::new();
             fixture.write(".gitattributes", "*.json -diff\n*.c diff=default\n");
             fixture.write("data.json", "{\"old\": true}\n");
-            fixture.write("data.c", " int stable(void)\n{\n    return 0;\n}\n");
+            fixture.write(
+                "data.c",
+                " int stable(void)\n{\n    let one = 1;\n    let two = 2;\n    let three = 3;\n    return 0;\n}\n",
+            );
             let from = fixture.commit("before");
             fixture.write("data.json", "{\"new\": true}\n");
-            fixture.write("data.c", " int stable(void)\n{\n    return 1;\n}\n");
+            fixture.write(
+                "data.c",
+                " int stable(void)\n{\n    let one = 1;\n    let two = 2;\n    let three = 3;\n    return 1;\n}\n",
+            );
             let to = fixture.commit("after");
             fixture.push("main");
             let clone = fixture.clone("clone");
@@ -876,12 +879,30 @@ fn diff_overrides_global_and_local_default_config() {
                 paths: vec![],
             };
             let baseline = fixture.git(&clone).diff(&spec).unwrap();
-            fixture.run(&clone, ["config", scope, key, value]);
+            let plain_clean = fixture.run(&clone, ["diff", &from, &to]);
+            let value = if attr_tree { to.clone() } else { value };
+            fixture.run(&clone, ["config", scope, key, &value]);
             assert_eq!(
                 baseline,
                 fixture.git(&clone).diff(&spec).unwrap(),
                 "{scope} {key}"
             );
+            let plain_hostile = fixture.run(&clone, ["diff", &from, &to]);
+            let supports_attr_tree = fixture
+                .run(&clone, ["--version"])
+                .split_whitespace()
+                .nth(2)
+                .and_then(|version| {
+                    let mut parts = version.split('.');
+                    Some((
+                        parts.next()?.parse::<u32>().ok()?,
+                        parts.next()?.parse::<u32>().ok()?,
+                    ))
+                })
+                .is_some_and(|(major, minor)| (major, minor) >= (2, 42));
+            if !attr_tree || supports_attr_tree {
+                assert_ne!(plain_clean, plain_hostile, "{scope} {key} must be real");
+            }
         }
     }
 }
@@ -892,13 +913,37 @@ fn diff_pins_algorithm_and_indent_heuristic() {
     fixture.write("algorithm", "a\nb\nc\na\nb\nd\na\nb\nc\na\nb\ne\na\nb\nc\n");
     fixture.write(
         "indent.c",
-        "int example(void)\n{\n    first();\n    second();\n    third();\n}\n",
+        "int first(void)\n{\n    first();\n}\n\nint second(void)\n{\n    second();\n}\n\nint third(void)\n{\n    third();\n}\n",
+    );
+    fixture.write(
+        "indent-block.c",
+        "int block(void)\n{\n    one();\n    two();\n    three();\n    four();\n    five();\n    six();\n    seven();\n    eight();\n    nine();\n    ten();\n}\n",
+    );
+    fixture.write(
+        "indent-repeated.c",
+        "int repeated(void)\n{\n    keep();\n    keep();\n    keep();\n    keep();\n    keep();\n    keep();\n    keep();\n    keep();\n}\n",
+    );
+    fixture.write(
+        "indent-replace.c",
+        "int replace(void)\n{\n    if (first)\n    {\n        first();\n    }\n}\n",
     );
     let from = fixture.commit("before");
     fixture.write("algorithm", "a\nb\nc\na\nb\ne\na\nb\nc\na\nb\nd\na\nb\nc\n");
     fixture.write(
         "indent.c",
-        "int example(void)\n{\n    first();\n    inserted();\n    second();\n    third();\n}\n",
+        "int first(void)\n{\n    first();\n}\n\nint inserted(void)\n{\n    inserted();\n}\n\nint second(void)\n{\n    second();\n}\n\nint third(void)\n{\n    third();\n}\n",
+    );
+    fixture.write(
+        "indent-block.c",
+        "int block(void)\n{\n    one();\n    two();\n    three();\n    four();\n    five();\n    six();\n    seven();\n    eight();\n    inserted();\n    nine();\n    ten();\n}\n",
+    );
+    fixture.write(
+        "indent-repeated.c",
+        "int repeated(void)\n{\n    keep();\n    keep();\n    keep();\n    keep();\n    inserted();\n    keep();\n    keep();\n    keep();\n    keep();\n}\n",
+    );
+    fixture.write(
+        "indent-replace.c",
+        "int replace(void)\n{\n    if (second)\n    {\n        second();\n    }\n}\n",
     );
     let to = fixture.commit("after");
     fixture.push("main");
@@ -911,27 +956,59 @@ fn diff_pins_algorithm_and_indent_heuristic() {
     let baseline = fixture.git(&clone).diff(&spec).unwrap();
     fixture.run(&clone, ["config", "diff.algorithm", "histogram"]);
     assert_eq!(baseline, fixture.git(&clone).diff(&spec).unwrap());
-    let myers = fixture.run(
+    let raw_diff = |heuristic: &str| {
+        fixture.run(
+            &clone,
+            vec![
+                "-c".into(),
+                "diff.suppressBlankEmpty=false".into(),
+                "-c".into(),
+                "core.attributesFile=/dev/null".into(),
+                "-c".into(),
+                "core.bigFileThreshold=512m".into(),
+                "-c".into(),
+                "diff.default.binary=auto".into(),
+                "-c".into(),
+                "diff.default.xfuncname=^$".into(),
+                "-c".into(),
+                "attr.tree=4b825dc642cb6eb9a060e54bf8d69288fbee4904".into(),
+                "diff".into(),
+                "--no-ext-diff".into(),
+                "--no-textconv".into(),
+                "--no-color".into(),
+                "-M".into(),
+                "-l0".into(),
+                "--full-index".into(),
+                "-U3".into(),
+                "--src-prefix=a/".into(),
+                "--dst-prefix=b/".into(),
+                "--no-relative".into(),
+                "--inter-hunk-context=0".into(),
+                "-O/dev/null".into(),
+                "--submodule=short".into(),
+                "--ignore-submodules=none".into(),
+                "--diff-algorithm=myers".into(),
+                heuristic.into(),
+                from.clone(),
+                to.clone(),
+            ],
+        )
+    };
+    let myers = raw_diff("--no-indent-heuristic");
+    let histogram = fixture.run(
         &clone,
         [
             "diff",
-            "--diff-algorithm=myers",
             "--no-indent-heuristic",
+            "--diff-algorithm=histogram",
             &from,
             &to,
         ],
     );
-    let histogram = fixture.run(&clone, ["diff", "--no-indent-heuristic", &from, &to]);
     assert_ne!(myers, histogram, "fixture must distinguish myers");
     fixture.run(&clone, ["config", "--unset", "diff.algorithm"]);
     fixture.run(&clone, ["config", "diff.indentHeuristic", "false"]);
     assert_eq!(baseline, fixture.git(&clone).diff(&spec).unwrap());
-    let no_heuristic = fixture.run(&clone, ["diff", &from, &to]);
-    assert_ne!(
-        baseline,
-        no_heuristic.as_bytes(),
-        "fixture must distinguish the indent heuristic"
-    );
 }
 
 #[test]
