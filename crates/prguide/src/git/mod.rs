@@ -28,6 +28,9 @@ pub enum GitError {
     /// A ref name or object ID was rejected before invoking git.
     #[error("invalid ref {name:?}: {reason}")]
     InvalidRef { name: String, reason: String },
+    /// `git diff` output that the parser's grammar doesn't accept.
+    #[error("cannot parse git diff at line {line}: {message}")]
+    DiffParse { line: usize, message: String },
 }
 
 impl GitError {
@@ -38,6 +41,7 @@ impl GitError {
             Self::Missing => "git_missing",
             Self::NotInClone(_) => "not_in_clone",
             Self::InvalidRef { .. } => "invalid_ref",
+            Self::DiffParse { .. } => "diff_parse",
         }
     }
 }
@@ -106,6 +110,14 @@ mod tests {
             }
             .code(),
             "git_failed"
+        );
+        assert_eq!(
+            GitError::DiffParse {
+                line: 1,
+                message: "x".into()
+            }
+            .code(),
+            "diff_parse"
         );
     }
 }
