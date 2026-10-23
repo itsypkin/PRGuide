@@ -430,8 +430,8 @@ impl Git {
                 .into_iter()
                 .map(OsString::from),
         );
-        // A nonexistent index prevents attributes staged only in the reviewer's index
-        // from affecting a commit-to-commit diff.
+        // Keep an explicit nonexistent index so no diff-side lookup can read the
+        // reviewer's staged state; the empty work tree and current directory isolate attributes.
         let extra_env = vec![
             (OsString::from("GIT_INDEX_FILE"), index.into_os_string()),
             (OsString::from("GIT_ATTR_NOSYSTEM"), OsString::from("1")),
