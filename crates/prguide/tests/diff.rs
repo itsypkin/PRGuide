@@ -308,6 +308,10 @@ fn hunk_count_unknown_and_marker_errors_are_strict() {
     let marker =
         b"diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-x\n\\ Keine neue Zeile\n+y\n";
     assert!(parse(marker).unwrap()[0].hunks[0].lines[0].no_newline);
+    let side_overflow = b"diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,1 +1,2 @@\n-a\n+b\n-x\n";
+    let (line, message) = parse_error(side_overflow);
+    assert_eq!(line, 7);
+    assert_eq!(message, "hunk line exceeds its declared count");
 }
 
 #[test]
