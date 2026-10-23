@@ -240,7 +240,7 @@ impl<'a> Parser<'a> {
                     "header paths differ without rename metadata",
                 ));
             }
-            if rename.is_none() && header != render_header(old, new) && !has_octal_escape(header) {
+            if rename.is_none() && header != render_header(old, new) {
                 return Err(parse_error(header_line, "header paths are not canonical"));
             }
         }
@@ -455,12 +455,6 @@ fn prefixed_paths(old: &[u8], new: &[u8]) -> HeaderPaths {
         old.strip_prefix(b"a/")?.to_vec(),
         new.strip_prefix(b"b/")?.to_vec(),
     ))
-}
-
-fn has_octal_escape(value: &[u8]) -> bool {
-    value
-        .windows(2)
-        .any(|escape| escape[0] == b'\\' && matches!(escape[1], b'0'..=b'3'))
 }
 
 fn parse_name(value: &[u8]) -> Result<Vec<u8>, String> {

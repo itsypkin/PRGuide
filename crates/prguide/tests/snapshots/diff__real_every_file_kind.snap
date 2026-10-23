@@ -1,0 +1,610 @@
+---
+source: crates/prguide/tests/diff.rs
+expression: "format!(\"{files:#?}\")"
+---
+[
+    FileDiff {
+        path: "added",
+        old_path: None,
+        status: Added,
+        old_mode: None,
+        new_mode: Some(
+            33188,
+        ),
+        old_oid: Some(
+            "0000000000000000000000000000000000000000",
+        ),
+        new_oid: Some(
+            "d5f7fc3f74f7dec08280f370a975b112e8f60818",
+        ),
+        similarity: None,
+        binary: false,
+        mode_only: false,
+        submodule: false,
+        hunks: [
+            Hunk {
+                old_start: 0,
+                old_lines: 0,
+                new_start: 1,
+                new_lines: 1,
+                section: None,
+                lines: [
+                    Line {
+                        kind: Added,
+                        text: [
+                            97,
+                            100,
+                            100,
+                            101,
+                            100,
+                        ],
+                        no_newline: false,
+                    },
+                ],
+            },
+        ],
+    },
+    FileDiff {
+        path: "binary renamed",
+        old_path: Some(
+            "binary-rename",
+        ),
+        status: Renamed,
+        old_mode: Some(
+            33188,
+        ),
+        new_mode: Some(
+            33188,
+        ),
+        old_oid: Some(
+            "254834fe07f60f09b2bde27fd7734821dc328560",
+        ),
+        new_oid: Some(
+            "2787a2631f3878ce8ff4ee7a1688ef44872a94a0",
+        ),
+        similarity: Some(
+            96,
+        ),
+        binary: true,
+        mode_only: false,
+        submodule: false,
+        hunks: [],
+    },
+    FileDiff {
+        path: "binary-deleted",
+        old_path: None,
+        status: Deleted,
+        old_mode: Some(
+            33188,
+        ),
+        new_mode: None,
+        old_oid: Some(
+            "c2fc20decac06222c278423af870a87d04da6d61",
+        ),
+        new_oid: Some(
+            "0000000000000000000000000000000000000000",
+        ),
+        similarity: None,
+        binary: true,
+        mode_only: false,
+        submodule: false,
+        hunks: [],
+    },
+    FileDiff {
+        path: "binary-modified",
+        old_path: None,
+        status: Modified,
+        old_mode: Some(
+            33188,
+        ),
+        new_mode: Some(
+            33188,
+        ),
+        old_oid: Some(
+            "85371f28269e95b7ebc156df3ceb24b3285f3ead",
+        ),
+        new_oid: Some(
+            "d2b944c56a472bbd91c2dfb8b5334cf24ac3064f",
+        ),
+        similarity: None,
+        binary: true,
+        mode_only: false,
+        submodule: false,
+        hunks: [],
+    },
+    FileDiff {
+        path: "binchmod",
+        old_path: None,
+        status: Modified,
+        old_mode: Some(
+            33188,
+        ),
+        new_mode: Some(
+            33261,
+        ),
+        old_oid: Some(
+            "85371f28269e95b7ebc156df3ceb24b3285f3ead",
+        ),
+        new_oid: Some(
+            "d2b944c56a472bbd91c2dfb8b5334cf24ac3064f",
+        ),
+        similarity: None,
+        binary: true,
+        mode_only: false,
+        submodule: false,
+        hunks: [],
+    },
+    FileDiff {
+        path: "chmod",
+        old_path: None,
+        status: Modified,
+        old_mode: Some(
+            33188,
+        ),
+        new_mode: Some(
+            33261,
+        ),
+        old_oid: None,
+        new_oid: None,
+        similarity: None,
+        binary: false,
+        mode_only: true,
+        submodule: false,
+        hunks: [],
+    },
+    FileDiff {
+        path: "deleted",
+        old_path: None,
+        status: Deleted,
+        old_mode: Some(
+            33188,
+        ),
+        new_mode: None,
+        old_oid: Some(
+            "c8b1b42336f7e2c26898b5b99441d324f2de5412",
+        ),
+        new_oid: Some(
+            "0000000000000000000000000000000000000000",
+        ),
+        similarity: None,
+        binary: false,
+        mode_only: false,
+        submodule: false,
+        hunks: [
+            Hunk {
+                old_start: 1,
+                old_lines: 1,
+                new_start: 0,
+                new_lines: 0,
+                section: None,
+                lines: [
+                    Line {
+                        kind: Removed,
+                        text: [
+                            100,
+                            101,
+                            108,
+                            101,
+                            116,
+                            101,
+                        ],
+                        no_newline: false,
+                    },
+                ],
+            },
+        ],
+    },
+    FileDiff {
+        path: "edit-chmod",
+        old_path: None,
+        status: Modified,
+        old_mode: Some(
+            33188,
+        ),
+        new_mode: Some(
+            33261,
+        ),
+        old_oid: Some(
+            "90be1f3056c4f471f977a28497b8d4b392c55a02",
+        ),
+        new_oid: Some(
+            "294186e497a23bf3fbfde12aacc7f720f668fe9a",
+        ),
+        similarity: None,
+        binary: false,
+        mode_only: false,
+        submodule: false,
+        hunks: [
+            Hunk {
+                old_start: 1,
+                old_lines: 1,
+                new_start: 1,
+                new_lines: 1,
+                section: None,
+                lines: [
+                    Line {
+                        kind: Removed,
+                        text: [
+                            98,
+                            101,
+                            102,
+                            111,
+                            114,
+                            101,
+                        ],
+                        no_newline: false,
+                    },
+                    Line {
+                        kind: Added,
+                        text: [
+                            97,
+                            102,
+                            116,
+                            101,
+                            114,
+                        ],
+                        no_newline: false,
+                    },
+                ],
+            },
+        ],
+    },
+    FileDiff {
+        path: "edited-renamed",
+        old_path: Some(
+            "edited-rename",
+        ),
+        status: Renamed,
+        old_mode: Some(
+            33188,
+        ),
+        new_mode: Some(
+            33188,
+        ),
+        old_oid: Some(
+            "b2f931a67315c95c5daab3aac6de62e534808476",
+        ),
+        new_oid: Some(
+            "b80f223d08e2bf5eded81bcf6783e702a30a5560",
+        ),
+        similarity: Some(
+            75,
+        ),
+        binary: false,
+        mode_only: false,
+        submodule: false,
+        hunks: [
+            Hunk {
+                old_start: 1,
+                old_lines: 5,
+                new_start: 1,
+                new_lines: 5,
+                section: None,
+                lines: [
+                    Line {
+                        kind: Context,
+                        text: [
+                            111,
+                            110,
+                            101,
+                        ],
+                        no_newline: false,
+                    },
+                    Line {
+                        kind: Context,
+                        text: [
+                            116,
+                            119,
+                            111,
+                        ],
+                        no_newline: false,
+                    },
+                    Line {
+                        kind: Removed,
+                        text: [
+                            116,
+                            104,
+                            114,
+                            101,
+                            101,
+                        ],
+                        no_newline: false,
+                    },
+                    Line {
+                        kind: Added,
+                        text: [
+                            84,
+                            72,
+                            82,
+                            69,
+                            69,
+                        ],
+                        no_newline: false,
+                    },
+                    Line {
+                        kind: Context,
+                        text: [
+                            102,
+                            111,
+                            117,
+                            114,
+                        ],
+                        no_newline: false,
+                    },
+                    Line {
+                        kind: Context,
+                        text: [
+                            102,
+                            105,
+                            118,
+                            101,
+                        ],
+                        no_newline: false,
+                    },
+                ],
+            },
+        ],
+    },
+    FileDiff {
+        path: "empty-added",
+        old_path: None,
+        status: Added,
+        old_mode: None,
+        new_mode: Some(
+            33188,
+        ),
+        old_oid: Some(
+            "0000000000000000000000000000000000000000",
+        ),
+        new_oid: Some(
+            "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+        ),
+        similarity: None,
+        binary: false,
+        mode_only: false,
+        submodule: false,
+        hunks: [],
+    },
+    FileDiff {
+        path: "link-added",
+        old_path: None,
+        status: Added,
+        old_mode: None,
+        new_mode: Some(
+            57344,
+        ),
+        old_oid: Some(
+            "0000000000000000000000000000000000000000",
+        ),
+        new_oid: Some(
+            "1111111111111111111111111111111111111111",
+        ),
+        similarity: None,
+        binary: false,
+        mode_only: false,
+        submodule: true,
+        hunks: [],
+    },
+    FileDiff {
+        path: "link-deleted",
+        old_path: None,
+        status: Deleted,
+        old_mode: Some(
+            57344,
+        ),
+        new_mode: None,
+        old_oid: Some(
+            "2222222222222222222222222222222222222222",
+        ),
+        new_oid: Some(
+            "0000000000000000000000000000000000000000",
+        ),
+        similarity: None,
+        binary: false,
+        mode_only: false,
+        submodule: true,
+        hunks: [],
+    },
+    FileDiff {
+        path: "link-updated",
+        old_path: None,
+        status: Modified,
+        old_mode: Some(
+            57344,
+        ),
+        new_mode: Some(
+            57344,
+        ),
+        old_oid: Some(
+            "1111111111111111111111111111111111111111",
+        ),
+        new_oid: Some(
+            "2222222222222222222222222222222222222222",
+        ),
+        similarity: None,
+        binary: false,
+        mode_only: false,
+        submodule: true,
+        hunks: [],
+    },
+    FileDiff {
+        path: "modified",
+        old_path: None,
+        status: Modified,
+        old_mode: Some(
+            33188,
+        ),
+        new_mode: Some(
+            33188,
+        ),
+        old_oid: Some(
+            "90be1f3056c4f471f977a28497b8d4b392c55a02",
+        ),
+        new_oid: Some(
+            "294186e497a23bf3fbfde12aacc7f720f668fe9a",
+        ),
+        similarity: None,
+        binary: false,
+        mode_only: false,
+        submodule: false,
+        hunks: [
+            Hunk {
+                old_start: 1,
+                old_lines: 1,
+                new_start: 1,
+                new_lines: 1,
+                section: None,
+                lines: [
+                    Line {
+                        kind: Removed,
+                        text: [
+                            98,
+                            101,
+                            102,
+                            111,
+                            114,
+                            101,
+                        ],
+                        no_newline: false,
+                    },
+                    Line {
+                        kind: Added,
+                        text: [
+                            97,
+                            102,
+                            116,
+                            101,
+                            114,
+                        ],
+                        no_newline: false,
+                    },
+                ],
+            },
+        ],
+    },
+    FileDiff {
+        path: "pure-renamed",
+        old_path: Some(
+            "pure-rename",
+        ),
+        status: Renamed,
+        old_mode: None,
+        new_mode: None,
+        old_oid: None,
+        new_oid: None,
+        similarity: Some(
+            100,
+        ),
+        binary: false,
+        mode_only: false,
+        submodule: false,
+        hunks: [],
+    },
+    FileDiff {
+        path: "rename-chmodmed",
+        old_path: Some(
+            "rename-chmod",
+        ),
+        status: Renamed,
+        old_mode: Some(
+            33188,
+        ),
+        new_mode: Some(
+            33261,
+        ),
+        old_oid: None,
+        new_oid: None,
+        similarity: Some(
+            100,
+        ),
+        binary: false,
+        mode_only: true,
+        submodule: false,
+        hunks: [],
+    },
+    FileDiff {
+        path: "typechg",
+        old_path: None,
+        status: Deleted,
+        old_mode: Some(
+            33188,
+        ),
+        new_mode: None,
+        old_oid: Some(
+            "f52515160081df27fbe0548e58ee74c8c73d91a7",
+        ),
+        new_oid: Some(
+            "0000000000000000000000000000000000000000",
+        ),
+        similarity: None,
+        binary: false,
+        mode_only: false,
+        submodule: false,
+        hunks: [
+            Hunk {
+                old_start: 1,
+                old_lines: 1,
+                new_start: 0,
+                new_lines: 0,
+                section: None,
+                lines: [
+                    Line {
+                        kind: Removed,
+                        text: [
+                            114,
+                            101,
+                            103,
+                            117,
+                            108,
+                            97,
+                            114,
+                        ],
+                        no_newline: false,
+                    },
+                ],
+            },
+        ],
+    },
+    FileDiff {
+        path: "typechg",
+        old_path: None,
+        status: Added,
+        old_mode: None,
+        new_mode: Some(
+            40960,
+        ),
+        old_oid: Some(
+            "0000000000000000000000000000000000000000",
+        ),
+        new_oid: Some(
+            "1de565933b05f74c75ff9a6520af5f9f8a5a2f1d",
+        ),
+        similarity: None,
+        binary: false,
+        mode_only: false,
+        submodule: false,
+        hunks: [
+            Hunk {
+                old_start: 0,
+                old_lines: 0,
+                new_start: 1,
+                new_lines: 1,
+                section: None,
+                lines: [
+                    Line {
+                        kind: Added,
+                        text: [
+                            116,
+                            97,
+                            114,
+                            103,
+                            101,
+                            116,
+                        ],
+                        no_newline: true,
+                    },
+                ],
+            },
+        ],
+    },
+]
