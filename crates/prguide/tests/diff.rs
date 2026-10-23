@@ -185,15 +185,6 @@ fn selection_rejects_not_in_pr_and_root_ranges() {
 const OID_A: &str = "1111111111111111111111111111111111111111";
 const OID_B: &str = "2222222222222222222222222222222222222222";
 
-fn mode_only_header(name: &[u8]) -> Vec<u8> {
-    let mut output = b"diff --git ".to_vec();
-    output.extend_from_slice(name);
-    output.extend_from_slice(b" ");
-    output.extend_from_slice(name);
-    output.extend_from_slice(b"\nold mode 100644\nnew mode 100755\n");
-    output
-}
-
 #[test]
 fn unquote_every_escape() {
     let file = parse(
