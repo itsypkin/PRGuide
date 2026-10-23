@@ -22,6 +22,16 @@ const REMOVED_ENV: [&str; 7] = [
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
 ];
 
+const DIFF_REMOVED_ENV: [&str; 7] = [
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_DIFF_OPTS",
+    "GIT_ATTR_SOURCE",
+    "GIT_ICASE_PATHSPECS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
+];
+
 /// A local repository and environment in which to run git.
 #[derive(Debug, Clone)]
 pub struct Git {
@@ -124,17 +134,6 @@ impl Git {
         }
     }
 
-    fn run_removing_env<I, S>(
-        &self,
-        args: I,
-        extra_removed_env: &[&str],
-    ) -> Result<Vec<u8>, GitError>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        self.execute(args, None, extra_removed_env)
-    }
     fn execute<I, S>(
         &self,
         args: I,
@@ -376,111 +375,71 @@ impl Git {
     }
     /// Produce a config-independent raw git diff.
     pub fn diff(&self, spec: &DiffSpec) -> Result<Vec<u8>, GitError> {
-        let clone = self.discover()?;
+        let diff_git = Self {
+            dir: self.dir.clone(),
+            envs: self
+                .envs
+                .iter()
+                .filter(|(key, _)| {
+                    !DIFF_REMOVED_ENV
+                        .iter()
+                        .any(|removed| key == OsStr::new(removed))
+                })
+                .cloned()
+                .collect(),
+        };
+        let clone = diff_git.discover()?;
         let isolated = tempfile::tempdir()
             .map_err(|e| Self::failed_operation("git diff setup", e.to_string()))?;
-        let home = isolated.path().join("home");
-        fs::create_dir_all(home.join(".config"))
-            .map_err(|e| Self::failed_operation("git diff setup", e.to_string()))?;
-        fs::write(home.join(".gitconfig"), "")
-            .map_err(|e| Self::failed_operation("git diff setup", e.to_string()))?;
-        let git_dir = isolated.path().join("git");
-        let isolated_git = self
-            .with_dir(isolated.path())
-            .env("HOME", &home)
-            .env("XDG_CONFIG_HOME", home.join(".config"))
-            .env("GIT_ATTR_NOSYSTEM", "1")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"));
-        isolated_git.run(vec![
-            OsString::from("init"),
-            OsString::from("--bare"),
-            OsString::from("--template="),
-            git_dir.clone().into_os_string(),
-        ])?;
-        let objects_info = git_dir.join("objects/info");
-        fs::create_dir_all(&objects_info)
-            .map_err(|e| Self::failed_operation("git diff setup", e.to_string()))?;
-        fs::write(
-            objects_info.join("alternates"),
-            format!("{}\n", clone.common_dir.join("objects").display()),
-        )
-        .map_err(|e| Self::failed_operation("git diff setup", e.to_string()))?;
-
-        let (first, second) = match spec {
-            DiffSpec::ThreeDot { base_tip, head, .. } => {
-                (self.resolve_commit(base_tip)?, self.resolve_commit(head)?)
-            }
-            DiffSpec::TwoDot { from, to, .. } => {
-                (self.resolve_commit(from)?, self.resolve_commit(to)?)
-            }
-        };
-        isolated_git.run([
-            OsStr::new("--git-dir"),
-            git_dir.as_os_str(),
-            OsStr::new("config"),
-            OsStr::new("core.bare"),
-            OsStr::new("false"),
-        ])?;
         let worktree = isolated.path().join("worktree");
         fs::create_dir(&worktree)
             .map_err(|e| Self::failed_operation("git diff setup", e.to_string()))?;
-        let attribute_paths = isolated_git.run([
-            OsStr::new("--git-dir"),
-            git_dir.as_os_str(),
-            OsStr::new("ls-tree"),
-            OsStr::new("-r"),
-            OsStr::new("-z"),
-            OsStr::new("--name-only"),
-            OsStr::new(&second),
-        ])?;
-        let attribute_paths: Vec<_> = attribute_paths
-            .split(|byte| *byte == 0)
-            .filter(|path| *path == b".gitattributes" || path.ends_with(b"/.gitattributes"))
-            .map(|path| OsString::from(String::from_utf8_lossy(path).into_owned()))
-            .collect();
-        isolated_git.run([
-            OsStr::new("--git-dir"),
-            git_dir.as_os_str(),
-            OsStr::new("read-tree"),
-            OsStr::new(&second),
-        ])?;
-        if !attribute_paths.is_empty() {
-            let mut checkout = vec![
-                OsString::from("--git-dir"),
-                git_dir.clone().into_os_string(),
-                OsString::from("--work-tree"),
-                worktree.clone().into_os_string(),
-                OsString::from("checkout"),
-                OsString::from(&second),
-                OsString::from("--"),
-            ];
-            checkout.extend(attribute_paths);
-            isolated_git.run(checkout)?;
-        }
-
-        self.with_dir(&worktree)
-            .env("HOME", &home)
-            .env("XDG_CONFIG_HOME", home.join(".config"))
+        let index = isolated.path().join("index");
+        let (first, second) = match spec {
+            DiffSpec::ThreeDot { base_tip, head, .. } => (
+                diff_git.resolve_commit(base_tip)?,
+                diff_git.resolve_commit(head)?,
+            ),
+            DiffSpec::TwoDot { from, to, .. } => {
+                (diff_git.resolve_commit(from)?, diff_git.resolve_commit(to)?)
+            }
+        };
+        let mut args = vec![
+            OsString::from("--git-dir"),
+            clone.common_dir.into_os_string(),
+            OsString::from("--work-tree"),
+            worktree.clone().into_os_string(),
+        ];
+        args.extend(
+            spec.args_for(&first, &second)
+                .into_iter()
+                .map(OsString::from),
+        );
+        let (mut command, argv) = diff_git
+            .with_dir(&worktree)
+            .command(args, &DIFF_REMOVED_ENV);
+        command
+            .env("GIT_INDEX_FILE", index)
             .env("GIT_ATTR_NOSYSTEM", "1")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
-            .run_removing_env(
-                [
-                    vec![
-                        OsString::from("--git-dir"),
-                        git_dir.into_os_string(),
-                        OsString::from("--work-tree"),
-                        worktree.into_os_string(),
-                    ],
-                    spec.args_for(&first, &second)
-                        .into_iter()
-                        .map(OsString::from)
-                        .collect(),
-                ]
-                .concat(),
-                &["GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_DIFF_OPTS"],
-            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null());
+        let output = command
+            .spawn()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    GitError::Missing
+                } else {
+                    Self::failed(&argv, None, e.to_string())
+                }
+            })?
+            .wait_with_output()
+            .map_err(|e| Self::failed(&argv, None, e.to_string()))?;
+        if output.status.success() {
+            Ok(output.stdout)
+        } else {
+            Err(Self::failed(&argv, Some(output.status), output.stderr))
+        }
     }
 }
 

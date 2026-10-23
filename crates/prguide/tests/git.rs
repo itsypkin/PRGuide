@@ -519,36 +519,20 @@ fn three_dot_and_two_dot_diffs() {
 }
 
 #[test]
-fn diff_resolves_ref_names_and_uses_head_attributes() {
+fn diff_resolves_ref_names_and_ignores_commit_attributes() {
     let fixture = FixtureRepo::new();
+    fixture.write(".gitattributes", "*.json -diff\n*.c diff=foo\n");
     fixture.write("attrs.json", "{\"old\": true}\n");
-    fixture.write(".gitattributes", "*.json -diff\n");
+    fixture.write("attrs.c", "int old(void) { return 0; }\n");
     fixture.commit("base attributes");
-    fixture.write(".gitattributes", "*.json diff\n");
-    fixture.write("attrs.json", "{\"middle\": true}\n");
-    fixture.commit("head attributes override base");
-    fixture.write(".gitattributes", "*.json -diff\n");
     fixture.write("attrs.json", "{\"new\": true}\n");
+    fixture.write("attrs.c", "int new(void) { return 1; }\n");
     fixture.commit("head attributes");
     fixture.push("main");
     let clone = fixture.clone("clone");
+    fixture.run(&clone, ["config", "diff.foo.binary", "true"]);
     let git = fixture.git(&clone);
-
-    let head_wins = String::from_utf8(
-        git.diff(&DiffSpec::TwoDot {
-            from: "main~2".into(),
-            to: "main~1".into(),
-            paths: vec![],
-        })
-        .unwrap(),
-    )
-    .unwrap();
-    assert!(
-        head_wins.contains("-{\"old\": true}") && head_wins.contains("+{\"middle\": true}"),
-        "the head commit's attributes must override base attributes: {head_wins}"
-    );
-
-    let committed_attributes = String::from_utf8(
+    let isolated = String::from_utf8(
         git.diff(&DiffSpec::TwoDot {
             from: "main~1".into(),
             to: "main".into(),
@@ -558,11 +542,102 @@ fn diff_resolves_ref_names_and_uses_head_attributes() {
     )
     .unwrap();
     assert!(
-        committed_attributes.contains("Binary files a/attrs.json and b/attrs.json differ"),
-        "the head commit's attributes must apply: {committed_attributes}"
+        isolated.contains("-{\"old\": true}")
+            && isolated.contains("+{\"new\": true}")
+            && isolated.contains("@@ -1 +1 @@"),
+        "committed attributes must not affect diffs: {isolated}"
+    );
+    let ordinary = fixture.run(&clone, ["diff", "main~1", "main"]);
+    assert!(
+        ordinary.contains("Binary files"),
+        "plain git diff must demonstrate that the attributes apply"
     );
 }
 
+#[test]
+fn diff_works_in_blobless_clone_with_or_without_attributes() {
+    for attributes in [false, true] {
+        let fixture = FixtureRepo::new();
+        if attributes {
+            fixture.write(".gitattributes", "*.json -diff\n");
+        }
+        fixture.write("data.json", "{\"old\": true}\n");
+        let from = fixture.commit("before");
+        fixture.write("data.json", "{\"new\": true}\n");
+        let to = fixture.commit("after");
+        fixture.push("main");
+        fixture.run(
+            fixture.remote_path(),
+            ["config", "uploadpack.allowFilter", "true"],
+        );
+        let full = fixture.clone("full");
+        let blobless = fixture.path().join("blobless");
+        fixture.run(
+            fixture.path(),
+            vec![
+                "clone".into(),
+                "--filter=blob:none".into(),
+                "--no-checkout".into(),
+                format!("file://{}", fixture.remote_path().display()),
+                blobless.display().to_string(),
+            ],
+        );
+        let spec = DiffSpec::TwoDot {
+            from,
+            to,
+            paths: vec![],
+        };
+        assert_eq!(
+            fixture.git(&blobless).diff(&spec).unwrap(),
+            fixture.git(&full).diff(&spec).unwrap(),
+            "attributes={attributes}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn diff_ignores_attributes_under_non_utf8_directory() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let fixture = FixtureRepo::new();
+    fixture.write("data.json", "{\"old\": true}\n");
+    let from = fixture.commit("before");
+    fixture.write("data.json", "{\"new\": true}\n");
+    let attribute = fixture
+        .git(fixture.work_path())
+        .run_with_stdin(["hash-object", "-w", "--stdin"], b"*.json -diff\n")
+        .unwrap();
+    let attribute = String::from_utf8(attribute).unwrap();
+    let mut cacheinfo = format!("100644,{},", attribute.trim()).into_bytes();
+    cacheinfo.extend_from_slice(b"bad\xff/.gitattributes");
+    fixture
+        .git(fixture.work_path())
+        .run([
+            OsString::from("update-index"),
+            OsString::from("--add"),
+            OsString::from("--cacheinfo"),
+            OsString::from_vec(cacheinfo),
+        ])
+        .unwrap();
+    fixture.run(fixture.work_path(), ["commit", "-am", "after"]);
+    let to = fixture.head();
+    fixture.push("main");
+    let clone = fixture.clone("clone");
+    let output = String::from_utf8(
+        fixture
+            .git(&clone)
+            .diff(&DiffSpec::TwoDot {
+                from,
+                to,
+                paths: vec![],
+            })
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(output.contains("+{\"new\": true}"), "{output}");
+}
 #[test]
 fn diff_ignores_user_diff_config() {
     let fixture = FixtureRepo::new();
@@ -601,9 +676,8 @@ fn diff_ignores_user_diff_config() {
         String::from_utf8_lossy(&baseline).contains("rename from rename"),
         "fixture must require rename detection"
     );
-    fs::create_dir_all(clone.join(".git/info")).unwrap();
-    fs::write(clone.join(".git/info/attributes"), "*.json -diff\n").unwrap();
     fs::write(clone.join(".gitattributes"), "*.json -diff\n").unwrap();
+    fixture.run(&clone, ["add", ".gitattributes"]);
     for (key, value) in [
         ("diff.noprefix", "true"),
         ("diff.suppressBlankEmpty", "true"),
@@ -623,11 +697,26 @@ fn diff_ignores_user_diff_config() {
     ] {
         fixture.run(&clone, ["config", key, value]);
     }
+    fixture.run(
+        &clone,
+        [
+            "config",
+            "--global",
+            "core.attributesFile",
+            global_attributes.to_str().unwrap(),
+        ],
+    );
     assert_eq!(
         baseline,
         fixture
             .git(clone.join("sub"))
             .env("GIT_DIFF_OPTS", "--unified=0")
+            .env("GIT_ATTR_SOURCE", "HEAD~1")
+            .env("GIT_ICASE_PATHSPECS", "1")
+            .env("GIT_GLOB_PATHSPECS", "1")
+            .env("GIT_NOGLOB_PATHSPECS", "1")
+            .env("GIT_CONFIG_PARAMETERS", "'diff.noprefix=true'")
+            .env("GIT_CONFIG_COUNT", "1")
             .diff(&spec)
             .unwrap()
     );
