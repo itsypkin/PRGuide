@@ -896,7 +896,8 @@ fn diff_overrides_global_and_local_default_config() {
                 .unwrap();
             }
             let plain_clean = fixture.run(&clone, ["diff", &from, &to]);
-            fixture.run(&clone, ["config", scope, key, &value]);
+            let configured_value = if attr_tree { &to } else { &value };
+            fixture.run(&clone, ["config", scope, key, configured_value]);
             assert_eq!(
                 baseline,
                 fixture.git(&clone).diff(&spec).unwrap(),
@@ -915,9 +916,12 @@ fn diff_overrides_global_and_local_default_config() {
                     ))
                 })
                 .is_some_and(|(major, minor)| (major, minor) >= (2, 42));
-            if (!attr_tree && key != "core.bigFileThreshold" && key != "diff.default.binary")
-                || supports_attr_tree
-            {
+            if key == "core.bigFileThreshold" || key == "diff.default.binary" {
+                assert!(
+                    plain_hostile.contains("Binary files"),
+                    "{scope} {key} must make the text files binary"
+                );
+            } else if !attr_tree || supports_attr_tree {
                 assert_ne!(plain_clean, plain_hostile, "{scope} {key} must be real");
             }
         }
