@@ -70,7 +70,7 @@ impl Git {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        self.execute(args, None, &[])
+        self.execute(args, None, &[], &[])
     }
     /// Run git, supplying its standard input, and return captured stdout on success.
     pub fn run_with_stdin<I, S>(&self, args: I, stdin: &[u8]) -> Result<Vec<u8>, GitError>
@@ -78,10 +78,14 @@ impl Git {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        self.execute(args, Some(stdin), &[])
+        self.execute(args, Some(stdin), &[], &[])
     }
-
-    fn command<I, S>(&self, args: I, extra_removed_env: &[&str]) -> (Command, Vec<OsString>)
+    fn command<I, S>(
+        &self,
+        args: I,
+        extra_removed_env: &[&str],
+        extra_env: &[(OsString, OsString)],
+    ) -> (Command, Vec<OsString>)
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -103,6 +107,7 @@ impl Git {
         {
             cmd.env_remove(key);
         }
+        cmd.envs(extra_env.iter().map(|(key, value)| (key, value)));
         (cmd, argv)
     }
     fn failed(argv: &[OsString], status: Option<ExitStatus>, stderr: impl AsRef<[u8]>) -> GitError {
@@ -139,12 +144,13 @@ impl Git {
         args: I,
         input: Option<&[u8]>,
         extra_removed_env: &[&str],
+        extra_env: &[(OsString, OsString)],
     ) -> Result<Vec<u8>, GitError>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let (mut command, argv) = self.command(args, extra_removed_env);
+        let (mut command, argv) = self.command(args, extra_removed_env, extra_env);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         if input.is_some() {
             command.stdin(Stdio::piped());
@@ -187,10 +193,19 @@ impl Git {
             }
         }
     }
+
     /// Discover canonical worktree and common git directories.
     pub fn discover(&self) -> Result<RepoClone, GitError> {
+        self.discover_with_removed(&[])
+    }
+    fn discover_with_removed(&self, removed_env: &[&str]) -> Result<RepoClone, GitError> {
         let output = self
-            .run(["rev-parse", "--git-common-dir", "--show-toplevel"])
+            .execute(
+                ["rev-parse", "--git-common-dir", "--show-toplevel"],
+                None,
+                removed_env,
+                &[],
+            )
             .map_err(|e| match e {
                 GitError::Failed {
                     exit_code: Some(_),
@@ -364,31 +379,30 @@ impl Git {
     }
     /// Resolve a revision to a full commit object ID.
     pub fn resolve_commit(&self, rev: &str) -> Result<String, GitError> {
-        Ok(String::from_utf8_lossy(&self.run([
-            "rev-parse",
-            "--verify",
-            "--end-of-options",
-            &format!("{rev}^{{commit}}"),
-        ])?)
+        self.resolve_commit_with_removed(rev, &[])
+    }
+    fn resolve_commit_with_removed(
+        &self,
+        rev: &str,
+        removed_env: &[&str],
+    ) -> Result<String, GitError> {
+        Ok(String::from_utf8_lossy(&self.execute(
+            [
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                &format!("{rev}^{{commit}}"),
+            ],
+            None,
+            removed_env,
+            &[],
+        )?)
         .trim()
         .into())
     }
     /// Produce a config-independent raw git diff.
     pub fn diff(&self, spec: &DiffSpec) -> Result<Vec<u8>, GitError> {
-        let diff_git = Self {
-            dir: self.dir.clone(),
-            envs: self
-                .envs
-                .iter()
-                .filter(|(key, _)| {
-                    !DIFF_REMOVED_ENV
-                        .iter()
-                        .any(|removed| key == OsStr::new(removed))
-                })
-                .cloned()
-                .collect(),
-        };
-        let clone = diff_git.discover()?;
+        let clone = self.discover_with_removed(&DIFF_REMOVED_ENV)?;
         let isolated = tempfile::tempdir()
             .map_err(|e| Self::failed_operation("git diff setup", e.to_string()))?;
         let worktree = isolated.path().join("worktree");
@@ -397,12 +411,13 @@ impl Git {
         let index = isolated.path().join("index");
         let (first, second) = match spec {
             DiffSpec::ThreeDot { base_tip, head, .. } => (
-                diff_git.resolve_commit(base_tip)?,
-                diff_git.resolve_commit(head)?,
+                self.resolve_commit_with_removed(base_tip, &DIFF_REMOVED_ENV)?,
+                self.resolve_commit_with_removed(head, &DIFF_REMOVED_ENV)?,
             ),
-            DiffSpec::TwoDot { from, to, .. } => {
-                (diff_git.resolve_commit(from)?, diff_git.resolve_commit(to)?)
-            }
+            DiffSpec::TwoDot { from, to, .. } => (
+                self.resolve_commit_with_removed(from, &DIFF_REMOVED_ENV)?,
+                self.resolve_commit_with_removed(to, &DIFF_REMOVED_ENV)?,
+            ),
         };
         let mut args = vec![
             OsString::from("--git-dir"),
@@ -415,31 +430,13 @@ impl Git {
                 .into_iter()
                 .map(OsString::from),
         );
-        let (mut command, argv) = diff_git
-            .with_dir(&worktree)
-            .command(args, &DIFF_REMOVED_ENV);
-        command
-            .env("GIT_INDEX_FILE", index)
-            .env("GIT_ATTR_NOSYSTEM", "1")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(Stdio::null());
-        let output = command
-            .spawn()
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    GitError::Missing
-                } else {
-                    Self::failed(&argv, None, e.to_string())
-                }
-            })?
-            .wait_with_output()
-            .map_err(|e| Self::failed(&argv, None, e.to_string()))?;
-        if output.status.success() {
-            Ok(output.stdout)
-        } else {
-            Err(Self::failed(&argv, Some(output.status), output.stderr))
-        }
+        let extra_env = vec![
+            (OsString::from("GIT_INDEX_FILE"), index.into_os_string()),
+            (OsString::from("GIT_ATTR_NOSYSTEM"), OsString::from("1")),
+            (OsString::from("GIT_TERMINAL_PROMPT"), OsString::from("0")),
+        ];
+        self.with_dir(worktree)
+            .execute(args, None, &DIFF_REMOVED_ENV, &extra_env)
     }
 }
 

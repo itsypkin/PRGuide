@@ -519,7 +519,7 @@ fn three_dot_and_two_dot_diffs() {
 }
 
 #[test]
-fn diff_resolves_ref_names_and_ignores_commit_attributes() {
+fn diff_resolves_ref_names_and_ignores_all_pr_attributes() {
     let fixture = FixtureRepo::new();
     fixture.write(".gitattributes", "*.json -diff\n*.c diff=foo\n");
     fixture.write("attrs.json", "{\"old\": true}\n");
@@ -530,7 +530,20 @@ fn diff_resolves_ref_names_and_ignores_commit_attributes() {
     fixture.commit("head attributes");
     fixture.push("main");
     let clone = fixture.clone("clone");
-    fixture.run(&clone, ["config", "diff.foo.binary", "true"]);
+    let configured_attributes = fixture.path().join("configured-attributes");
+    fs::write(&configured_attributes, "*.json -diff\n*.c diff=foo\n").unwrap();
+    fixture.run(
+        &clone,
+        [
+            "config",
+            "--global",
+            "core.attributesFile",
+            configured_attributes.to_str().unwrap(),
+        ],
+    );
+    fixture.run(&clone, ["config", "--global", "diff.foo.binary", "true"]);
+    fs::write(clone.join(".gitattributes"), "*.json -diff\n*.c diff=foo\n").unwrap();
+    fixture.run(&clone, ["add", ".gitattributes"]);
     let git = fixture.git(&clone);
     let isolated = String::from_utf8(
         git.diff(&DiffSpec::TwoDot {
@@ -545,7 +558,7 @@ fn diff_resolves_ref_names_and_ignores_commit_attributes() {
         isolated.contains("-{\"old\": true}")
             && isolated.contains("+{\"new\": true}")
             && isolated.contains("@@ -1 +1 @@"),
-        "committed attributes must not affect diffs: {isolated}"
+        "attributes must not affect diffs: {isolated}"
     );
     let ordinary = fixture.run(&clone, ["diff", "main~1", "main"]);
     assert!(
@@ -602,51 +615,94 @@ fn diff_ignores_attributes_under_non_utf8_directory() {
     use std::os::unix::ffi::OsStringExt;
 
     let fixture = FixtureRepo::new();
-    fixture.write("data.json", "{\"old\": true}\n");
-    let from = fixture.commit("before");
-    fixture.write("data.json", "{\"new\": true}\n");
-    let attribute = fixture
-        .git(fixture.work_path())
-        .run_with_stdin(["hash-object", "-w", "--stdin"], b"*.json -diff\n")
-        .unwrap();
-    let attribute = String::from_utf8(attribute).unwrap();
-    let mut cacheinfo = format!("100644,{},", attribute.trim()).into_bytes();
-    cacheinfo.extend_from_slice(b"bad\xff/.gitattributes");
+    let attribute = String::from_utf8(
+        fixture
+            .git(fixture.work_path())
+            .run_with_stdin(["hash-object", "-w", "--stdin"], b"*.json -diff\n")
+            .unwrap(),
+    )
+    .unwrap();
+    let old = String::from_utf8(
+        fixture
+            .git(fixture.work_path())
+            .run_with_stdin(["hash-object", "-w", "--stdin"], b"{\"old\": true}\n")
+            .unwrap(),
+    )
+    .unwrap();
+    let new = String::from_utf8(
+        fixture
+            .git(fixture.work_path())
+            .run_with_stdin(["hash-object", "-w", "--stdin"], b"{\"new\": true}\n")
+            .unwrap(),
+    )
+    .unwrap();
+    let cacheinfo = |oid: &[u8], path: &[u8]| {
+        let mut value = b"100644,".to_vec();
+        value.extend_from_slice(oid);
+        value.extend_from_slice(b",");
+        value.extend_from_slice(path);
+        OsString::from_vec(value)
+    };
     fixture
         .git(fixture.work_path())
         .run([
             OsString::from("update-index"),
             OsString::from("--add"),
             OsString::from("--cacheinfo"),
-            OsString::from_vec(cacheinfo),
+            cacheinfo(attribute.trim().as_bytes(), b"bad\xff/.gitattributes"),
+            OsString::from("--cacheinfo"),
+            cacheinfo(old.trim().as_bytes(), b"bad\xff/data.json"),
         ])
         .unwrap();
-    fixture.run(fixture.work_path(), ["commit", "-am", "after"]);
+    fixture.run(fixture.work_path(), ["commit", "-m", "before"]);
+    let from = fixture.head();
+    fixture
+        .git(fixture.work_path())
+        .run([
+            OsString::from("update-index"),
+            OsString::from("--cacheinfo"),
+            cacheinfo(new.trim().as_bytes(), b"bad\xff/data.json"),
+        ])
+        .unwrap();
+    fixture.run(fixture.work_path(), ["commit", "-m", "after"]);
     let to = fixture.head();
     fixture.push("main");
-    let clone = fixture.clone("clone");
-    let output = String::from_utf8(
-        fixture
-            .git(&clone)
-            .diff(&DiffSpec::TwoDot {
-                from,
-                to,
-                paths: vec![],
-            })
-            .unwrap(),
-    )
-    .unwrap();
-    assert!(output.contains("+{\"new\": true}"), "{output}");
+    let clone = fixture.path().join("clone");
+    fixture.run(
+        fixture.path(),
+        vec![
+            "clone".into(),
+            "--no-checkout".into(),
+            fixture.remote_path().display().to_string(),
+            clone.display().to_string(),
+        ],
+    );
+    let output = fixture
+        .git(&clone)
+        .diff(&DiffSpec::TwoDot {
+            from,
+            to,
+            paths: vec![],
+        })
+        .unwrap();
+    let output = String::from_utf8_lossy(&output);
+    assert!(
+        output.contains("-{\"old\": true}") && output.contains("+{\"new\": true}"),
+        "{output}"
+    );
+    assert!(!output.contains("Binary files"), "{output}");
 }
 #[test]
 fn diff_ignores_user_diff_config() {
     let fixture = FixtureRepo::new();
     let from = fixture.head();
+    fixture.write(".gitattributes", "*.json -diff\n*.c diff=foo\n");
     fixture.write("top", "one\n\nold\n1\n2\n3\n4\n5\n6\n7\n8\nold2\n");
     fixture.write("sub/in", "old\n");
     fixture.write("rename", "a1\na2\na3\na4\na5\na6\na7\na8\na9\na10\n");
     fixture.write("rename-two", "b1\nb2\nb3\nb4\nb5\nb6\nb7\nb8\nb9\nb10\n");
     fixture.write("attrs.json", "{\"old\": true}\n");
+    fixture.write("attrs.c", "int old(void) { return 0; }\n");
     let before_link = fixture.commit("before");
     fixture.rename("rename", "renamed");
     fixture.rename("rename-two", "renamed-two");
@@ -656,6 +712,7 @@ fn diff_ignores_user_diff_config() {
         "b1\nb2\nb3\nb4\nb5\nb6\nb7\nb8\nb9\nchanged\n",
     );
     fixture.write("attrs.json", "{\"new\": true}\n");
+    fixture.write("attrs.c", "int new(void) { return 1; }\n");
     fixture.write("top", "one\n\nnew\n1\n2\n3\n4\n5\n6\n7\n8\nnew2\n");
     fixture.write("sub/in", "new\n");
     fixture.gitlink("link", &from);
@@ -665,18 +722,24 @@ fn diff_ignores_user_diff_config() {
     fs::create_dir_all(clone.join("sub")).unwrap();
     fs::write(clone.join("order"), "sub/in\ntop\n").unwrap();
     let global_attributes = fixture.path().join("global-attributes");
-    fs::write(&global_attributes, "*.json -diff\n").unwrap();
+    fs::write(&global_attributes, "*.json -diff\n*.c diff=foo\n").unwrap();
     let spec = DiffSpec::TwoDot {
-        from: before_link,
-        to,
+        from: before_link.clone(),
+        to: to.clone(),
         paths: vec![],
     };
     let baseline = fixture.git(&clone).diff(&spec).unwrap();
     assert!(
+        String::from_utf8_lossy(&baseline).contains("-{\"old\": true}")
+            && String::from_utf8_lossy(&baseline).contains("+{\"new\": true}")
+            && String::from_utf8_lossy(&baseline).contains("@@ -1 +1 @@"),
+        "fixture must require text diffs without attribute drivers"
+    );
+    assert!(
         String::from_utf8_lossy(&baseline).contains("rename from rename"),
         "fixture must require rename detection"
     );
-    fs::write(clone.join(".gitattributes"), "*.json -diff\n").unwrap();
+    fs::write(clone.join(".gitattributes"), "*.json -diff\n*.c diff=foo\n").unwrap();
     fixture.run(&clone, ["add", ".gitattributes"]);
     for (key, value) in [
         ("diff.noprefix", "true"),
@@ -692,6 +755,7 @@ fn diff_ignores_user_diff_config() {
         ("diff.renameLimit", "1"),
         ("core.abbrev", "12"),
         ("core.attributesFile", global_attributes.to_str().unwrap()),
+        ("diff.foo.binary", "true"),
         ("diff.algorithm", "histogram"),
         ("diff.indentHeuristic", "false"),
     ] {
@@ -706,20 +770,43 @@ fn diff_ignores_user_diff_config() {
             global_attributes.to_str().unwrap(),
         ],
     );
-    assert_eq!(
-        baseline,
-        fixture
-            .git(clone.join("sub"))
-            .env("GIT_DIFF_OPTS", "--unified=0")
-            .env("GIT_ATTR_SOURCE", "HEAD~1")
-            .env("GIT_ICASE_PATHSPECS", "1")
-            .env("GIT_GLOB_PATHSPECS", "1")
-            .env("GIT_NOGLOB_PATHSPECS", "1")
-            .env("GIT_CONFIG_PARAMETERS", "'diff.noprefix=true'")
-            .env("GIT_CONFIG_COUNT", "1")
-            .diff(&spec)
-            .unwrap()
-    );
+    let hostile = fixture
+        .git(clone.join("sub"))
+        .env("GIT_DIFF_OPTS", "--unified=0")
+        .env("GIT_ATTR_SOURCE", &to)
+        .env("GIT_CONFIG_PARAMETERS", "'core.bigFileThreshold=1'")
+        .diff(&spec)
+        .unwrap();
+    assert_eq!(baseline, hostile);
+    let count_config = fixture
+        .git(clone.join("sub"))
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.bigFileThreshold")
+        .env("GIT_CONFIG_VALUE_0", "1")
+        .diff(&spec)
+        .unwrap();
+    assert_eq!(baseline, count_config);
+    let filtered = DiffSpec::TwoDot {
+        from: before_link,
+        to,
+        paths: vec!["attrs.json".into()],
+    };
+    let filtered_baseline = fixture.git(&clone).diff(&filtered).unwrap();
+    for variable in [
+        "GIT_ICASE_PATHSPECS",
+        "GIT_GLOB_PATHSPECS",
+        "GIT_NOGLOB_PATHSPECS",
+    ] {
+        assert_eq!(
+            filtered_baseline,
+            fixture
+                .git(clone.join("sub"))
+                .env(variable, "1")
+                .diff(&filtered)
+                .unwrap(),
+            "{variable}"
+        );
+    }
 }
 
 #[test]
