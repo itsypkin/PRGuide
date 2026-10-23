@@ -233,13 +233,17 @@ impl<'a> Parser<'a> {
         if rename.is_some() && !matches!(kind, HeaderKind::Plain) {
             return self.fail("rename cannot also be an added or deleted file");
         }
-        if rename.is_none() && header_paths.as_ref().is_some_and(|(old, new)| old != new) {
-            return Err(parse_error(
-                header_line,
-                "header paths differ without rename metadata",
-            ));
+        if let Some((old, new)) = header_paths.as_ref() {
+            if rename.is_none() && old != new {
+                return Err(parse_error(
+                    header_line,
+                    "header paths differ without rename metadata",
+                ));
+            }
+            if rename.is_none() && header != render_header(old, new) && !has_octal_escape(header) {
+                return Err(parse_error(header_line, "header paths are not canonical"));
+            }
         }
-
         let (old_path, new_path, status) = match (rename, kind) {
             (Some((old, new)), HeaderKind::Plain) => (old, new, FileStatus::Renamed),
             (None, HeaderKind::Added) => {
@@ -293,6 +297,12 @@ impl<'a> Parser<'a> {
             } else if line.starts_with(b"@@ ") {
                 return self.fail("hunk is missing file path lines");
             }
+        }
+        if self
+            .current()
+            .is_some_and(|line| !line.starts_with(b"diff --git "))
+        {
+            return self.fail("unknown line");
         }
 
         let mode_only = old_mode.is_some()
@@ -414,17 +424,21 @@ fn parse_header(line: &[u8]) -> Result<HeaderPaths, String> {
     };
     if rest.starts_with(b"\"") {
         let (old, consumed) = parse_quoted(rest)?;
-        if rest.get(consumed) != Some(&b' ') || rest.get(consumed + 1) != Some(&b'\"') {
-            return Err("invalid quoted diff header".into());
+        let remainder = &rest[consumed..];
+        let Some(remainder) = remainder.strip_prefix(b" ") else {
+            return Ok(None);
+        };
+        if !remainder.starts_with(b"\"") {
+            return Ok(None);
         }
-        let (new, used) = parse_quoted(&rest[consumed + 1..])?;
-        if consumed + 1 + used != rest.len() {
-            return Err("trailing bytes in diff header".into());
+        let (new, used) = parse_quoted(remainder)?;
+        if used != remainder.len() {
+            return Ok(None);
         }
-        return prefixed_paths(&old, &new).map(Some);
+        return Ok(prefixed_paths(&old, &new));
     }
-    if rest.contains(&b'\"') {
-        return Err("mixed quoted and raw diff header".into());
+    if rest.contains(&b'"') {
+        return Ok(None);
     }
     if rest.len() % 2 == 0 {
         return Ok(None);
@@ -433,17 +447,20 @@ fn parse_header(line: &[u8]) -> Result<HeaderPaths, String> {
     if rest[middle] != b' ' {
         return Ok(None);
     }
-    prefixed_paths(&rest[..middle], &rest[middle + 1..]).map(Some)
+    Ok(prefixed_paths(&rest[..middle], &rest[middle + 1..]))
 }
 
-fn prefixed_paths(old: &[u8], new: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
-    let Some(old) = old.strip_prefix(b"a/") else {
-        return Err("old header path lacks a/ prefix".into());
-    };
-    let Some(new) = new.strip_prefix(b"b/") else {
-        return Err("new header path lacks b/ prefix".into());
-    };
-    Ok((old.to_vec(), new.to_vec()))
+fn prefixed_paths(old: &[u8], new: &[u8]) -> HeaderPaths {
+    Some((
+        old.strip_prefix(b"a/")?.to_vec(),
+        new.strip_prefix(b"b/")?.to_vec(),
+    ))
+}
+
+fn has_octal_escape(value: &[u8]) -> bool {
+    value
+        .windows(2)
+        .any(|escape| escape[0] == b'\\' && matches!(escape[1], b'0'..=b'3'))
 }
 
 fn parse_name(value: &[u8]) -> Result<Vec<u8>, String> {
@@ -579,6 +596,9 @@ fn parse_percent(value: &[u8]) -> Result<u8, String> {
     let Some(value) = value.strip_suffix(b"%") else {
         return Err("similarity needs percent sign".into());
     };
+    if value.is_empty() || value.iter().any(|byte| !byte.is_ascii_digit()) {
+        return Err("invalid similarity".into());
+    }
     let text = std::str::from_utf8(value).map_err(|_| "invalid similarity")?;
     let percent: u8 = text.parse().map_err(|_| "invalid similarity")?;
     if percent > 100 {
