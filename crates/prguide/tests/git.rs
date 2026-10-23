@@ -391,6 +391,16 @@ fn expected_args(revision: &str, paths: &[&str]) -> Vec<String> {
         "diff.suppressBlankEmpty=false",
         "-c",
         "core.attributesFile=/dev/null",
+        "-c",
+        "core.bigFileThreshold=512m",
+        "-c",
+        "diff.default.binary=auto",
+        "-c",
+        "diff.default.xfuncname=^$",
+        "-c",
+        "diff.default.funcname=^$",
+        "-c",
+        "attr.tree=4b825dc642cb6eb9a060e54bf8d69288fbee4904",
         "diff",
         "--no-ext-diff",
         "--no-textconv",
@@ -584,13 +594,16 @@ fn diff_ignores_index_only_attributes() {
     let baseline = fixture.git(&clone).diff(&spec).unwrap();
     fs::write(clone.join(".gitattributes"), "*.json -diff\n").unwrap();
     fixture.run(&clone, ["add", ".gitattributes"]);
+    fs::remove_file(clone.join(".gitattributes")).unwrap();
+    assert_eq!(
+        fixture.run(
+            &clone,
+            ["check-attr", "--cached", "diff", "--", "data.json"]
+        ),
+        "data.json: diff: unset"
+    );
     let isolated = fixture.git(&clone).diff(&spec).unwrap();
     assert_eq!(baseline, isolated);
-    let ordinary = fixture.run(&clone, ["diff", "main~1", "main"]);
-    assert!(
-        ordinary.contains("Binary files"),
-        "plain git diff must demonstrate that the staged attributes apply"
-    );
 }
 
 #[test]
@@ -770,6 +783,7 @@ fn diff_ignores_user_diff_config() {
     for (key, value) in [
         ("diff.noprefix", "true"),
         ("diff.suppressBlankEmpty", "true"),
+        ("diff.context", "0"),
         ("diff.interHunkContext", "10"),
         ("diff.orderFile", "order"),
         ("diff.relative", "true"),
@@ -833,6 +847,91 @@ fn diff_ignores_user_diff_config() {
             "{variable}"
         );
     }
+}
+
+#[test]
+fn diff_overrides_global_and_local_default_config() {
+    for scope in ["--global", "--local"] {
+        for (key, value) in [
+            ("core.bigFileThreshold", "1"),
+            ("diff.default.binary", "true"),
+            ("diff.default.xfuncname", "^ +(int .*)$"),
+            ("diff.default.funcname", "^ +(int .*)$"),
+            ("diff.default.textconv", "tr a-z A-Z <"),
+            ("attr.tree", "HEAD"),
+        ] {
+            let fixture = FixtureRepo::new();
+            fixture.write(".gitattributes", "*.json -diff\n*.c diff=default\n");
+            fixture.write("data.json", "{\"old\": true}\n");
+            fixture.write("data.c", " int stable(void)\n{\n    return 0;\n}\n");
+            let from = fixture.commit("before");
+            fixture.write("data.json", "{\"new\": true}\n");
+            fixture.write("data.c", " int stable(void)\n{\n    return 1;\n}\n");
+            let to = fixture.commit("after");
+            fixture.push("main");
+            let clone = fixture.clone("clone");
+            let spec = DiffSpec::TwoDot {
+                from: from.clone(),
+                to: to.clone(),
+                paths: vec![],
+            };
+            let baseline = fixture.git(&clone).diff(&spec).unwrap();
+            fixture.run(&clone, ["config", scope, key, value]);
+            assert_eq!(
+                baseline,
+                fixture.git(&clone).diff(&spec).unwrap(),
+                "{scope} {key}"
+            );
+        }
+    }
+}
+
+#[test]
+fn diff_pins_algorithm_and_indent_heuristic() {
+    let fixture = FixtureRepo::new();
+    fixture.write("algorithm", "a\nb\nc\na\nb\nd\na\nb\nc\na\nb\ne\na\nb\nc\n");
+    fixture.write(
+        "indent.c",
+        "int example(void)\n{\n    first();\n    second();\n    third();\n}\n",
+    );
+    let from = fixture.commit("before");
+    fixture.write("algorithm", "a\nb\nc\na\nb\ne\na\nb\nc\na\nb\nd\na\nb\nc\n");
+    fixture.write(
+        "indent.c",
+        "int example(void)\n{\n    first();\n    inserted();\n    second();\n    third();\n}\n",
+    );
+    let to = fixture.commit("after");
+    fixture.push("main");
+    let clone = fixture.clone("clone");
+    let spec = DiffSpec::TwoDot {
+        from: from.clone(),
+        to: to.clone(),
+        paths: vec![],
+    };
+    let baseline = fixture.git(&clone).diff(&spec).unwrap();
+    fixture.run(&clone, ["config", "diff.algorithm", "histogram"]);
+    assert_eq!(baseline, fixture.git(&clone).diff(&spec).unwrap());
+    let myers = fixture.run(
+        &clone,
+        [
+            "diff",
+            "--diff-algorithm=myers",
+            "--no-indent-heuristic",
+            &from,
+            &to,
+        ],
+    );
+    let histogram = fixture.run(&clone, ["diff", "--no-indent-heuristic", &from, &to]);
+    assert_ne!(myers, histogram, "fixture must distinguish myers");
+    fixture.run(&clone, ["config", "--unset", "diff.algorithm"]);
+    fixture.run(&clone, ["config", "diff.indentHeuristic", "false"]);
+    assert_eq!(baseline, fixture.git(&clone).diff(&spec).unwrap());
+    let no_heuristic = fixture.run(&clone, ["diff", &from, &to]);
+    assert_ne!(
+        baseline,
+        no_heuristic.as_bytes(),
+        "fixture must distinguish the indent heuristic"
+    );
 }
 
 #[test]

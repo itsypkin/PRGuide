@@ -337,7 +337,8 @@ impl Git {
     }
     /// Read a blob at a commit path without filters or text conversion.
     pub fn show(&self, sha: &str, path: &str) -> Result<Option<Vec<u8>>, GitError> {
-        let entry = self.run(["ls-tree", "-z", "--full-tree", sha, "--", path])?;
+        let git = self.clone().env("GIT_TERMINAL_PROMPT", "0");
+        let entry = git.run(["ls-tree", "-z", "--full-tree", sha, "--", path])?;
         let Some(entry) = entry.split(|b| *b == 0).next().filter(|v| !v.is_empty()) else {
             return Ok(None);
         };
@@ -353,7 +354,7 @@ impl Git {
             return Ok(None);
         }
         let oid = String::from_utf8_lossy(fields[2]).into_owned();
-        self.run(["cat-file", "blob", &oid]).map(Some)
+        git.run(["cat-file", "blob", &oid]).map(Some)
     }
     /// Find the merge base, or `None` for unrelated histories.
     pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>, GitError> {
@@ -430,8 +431,8 @@ impl Git {
                 .into_iter()
                 .map(OsString::from),
         );
-        // Keep an explicit nonexistent index so no diff-side lookup can read the
-        // reviewer's staged state; the empty work tree and current directory isolate attributes.
+        // Defence in depth: check-attr and index-loading diffs read index attributes;
+        // a commit-to-commit diff was never observed to (2.30/2.55/2.56).
         let extra_env = vec![
             (OsString::from("GIT_INDEX_FILE"), index.into_os_string()),
             (OsString::from("GIT_ATTR_NOSYSTEM"), OsString::from("1")),
@@ -503,6 +504,16 @@ impl DiffSpec {
             "diff.suppressBlankEmpty=false".into(),
             "-c".into(),
             "core.attributesFile=/dev/null".into(),
+            "-c".into(),
+            "core.bigFileThreshold=512m".into(),
+            "-c".into(),
+            "diff.default.binary=auto".into(),
+            "-c".into(),
+            "diff.default.xfuncname=^$".into(),
+            "-c".into(),
+            "diff.default.funcname=^$".into(),
+            "-c".into(),
+            "attr.tree=4b825dc642cb6eb9a060e54bf8d69288fbee4904".into(),
             "diff".into(),
             "--no-ext-diff".into(),
             "--no-textconv".into(),
