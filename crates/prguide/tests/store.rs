@@ -742,9 +742,70 @@ fn start_then_run_active_then_takeover() {
             Some("takeover".into())
         )
     );
-    assert_eq!(run_row(&mut store, &b.id).0, "active");
+    assert_eq!(
+        run_row(&mut store, &b.id),
+        (
+            "active".into(),
+            "2026-10-23T00:01:00.000Z".into(),
+            "2026-10-23T00:31:00.000Z".into(),
+            None,
+            None
+        )
+    );
     assert_pending(&mut store, "e1");
     assert_eq!(code(runs::require_active(&mut store, &a.id)), "run_stopped");
+}
+
+#[test]
+fn undecodable_run_rows_are_store_sqlite() {
+    let (t, mut store, _clock) = setup();
+    inject(
+        &t,
+        "PRAGMA ignore_check_constraints=ON; \
+         INSERT INTO runs VALUES('r_badstate','bogus','t','t',NULL,NULL); \
+         INSERT INTO runs VALUES('r_badreason','stopped','t','t','t','bogus');",
+    );
+    for id in ["r_badstate", "r_badreason"] {
+        assert_eq!(
+            code(runs::require_active(&mut store, &RunId::new(id))),
+            "store_sqlite"
+        );
+    }
+}
+
+#[test]
+fn vanishing_rows_after_a_write_are_store_sqlite() {
+    // start_run: the new row is deleted right after the insert.
+    let (t, mut store, _c) = setup();
+    inject(
+        &t,
+        "CREATE TRIGGER vanish AFTER INSERT ON runs BEGIN DELETE FROM runs WHERE id = NEW.id; END;",
+    );
+    assert_eq!(code(runs::start_run(&mut store, false)), "store_sqlite");
+    assert_eq!(run_count(&mut store), 0);
+
+    // gate renewal: the row is deleted right after the lease update.
+    let (t, mut store, _c) = setup();
+    let a = runs::start_run(&mut store, false).expect("start").id;
+    inject(
+        &t,
+        "CREATE TRIGGER vanish AFTER UPDATE OF lease_until ON runs BEGIN DELETE FROM runs WHERE id = NEW.id; END;",
+    );
+    assert_eq!(code(runs::require_active(&mut store, &a)), "store_sqlite");
+    assert_eq!(run_count(&mut store), 1);
+
+    // end_run: the row is deleted right after the state update.
+    let (t, mut store, _c) = setup();
+    let a = runs::start_run(&mut store, false).expect("start").id;
+    inject(
+        &t,
+        "CREATE TRIGGER vanish AFTER UPDATE OF state ON runs BEGIN DELETE FROM runs WHERE id = NEW.id; END;",
+    );
+    assert_eq!(
+        code(runs::stop_run(&mut store, &a, StopReason::End)),
+        "store_sqlite"
+    );
+    assert_eq!(run_count(&mut store), 1);
 }
 
 #[test]

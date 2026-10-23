@@ -170,9 +170,12 @@ fn end_run(
          WHERE state = 'claimed' AND claimed_by = ?1",
         [id.as_str()],
     )?;
-    fetch(tx, id.as_str())?.ok_or_else(|| StoreError::RunUnknown {
-        run_id: id.to_string(),
-    })
+    fetch_updated(tx, id.as_str())
+}
+
+/// Re-reads a row this transaction just wrote; a missing row is a SQLite-level failure.
+fn fetch_updated(tx: &Transaction<'_>, id: &str) -> Result<Run, StoreError> {
+    fetch(tx, id)?.ok_or_else(|| StoreError::from(rusqlite::Error::QueryReturnedNoRows))
 }
 
 fn expire(tx: &Transaction<'_>, now: Timestamp, run: &Run) -> Result<Run, StoreError> {
@@ -216,9 +219,7 @@ pub fn gate(tx: &Transaction<'_>, now: Timestamp, run_id: &RunId) -> Result<RunG
         "UPDATE runs SET lease_until = ?1 WHERE id = ?2 AND state = 'active'",
         params![now.saturating_add(LEASE).to_rfc3339(), run_id.as_str()],
     )?;
-    let renewed = fetch(tx, run_id.as_str())?.ok_or_else(|| StoreError::RunUnknown {
-        run_id: run_id.to_string(),
-    })?;
+    let renewed = fetch_updated(tx, run_id.as_str())?;
     Ok(RunGate::Active(renewed))
 }
 
@@ -242,7 +243,7 @@ pub fn start_run(store: &mut Store, takeover: bool) -> Result<Run, StoreError> {
              VALUES (?1, 'active', ?2, ?3, NULL, NULL)",
             params![id, now.to_rfc3339(), now.saturating_add(LEASE).to_rfc3339()],
         )?;
-        fetch(tx, &id)?.ok_or(StoreError::RunUnknown { run_id: id })
+        fetch_updated(tx, &id)
     })
 }
 
