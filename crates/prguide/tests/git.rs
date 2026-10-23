@@ -396,7 +396,7 @@ fn expected_args(revision: &str, paths: &[&str]) -> Vec<String> {
         "-c",
         "diff.default.binary=auto",
         "-c",
-        "diff.default.xfuncname=^$",
+        "diff.default.xfuncname=^[A-Za-z_$].*",
         "-c",
         "attr.tree=4b825dc642cb6eb9a060e54bf8d69288fbee4904",
         "diff",
@@ -444,6 +444,90 @@ fn diff_spec_args_are_fixed() {
         .args(),
         expected_args("a...b", &[])
     );
+}
+
+fn hunk_headers(output: &[u8]) -> Vec<&str> {
+    std::str::from_utf8(output)
+        .unwrap()
+        .lines()
+        .filter(|line| line.starts_with("@@"))
+        .collect()
+}
+
+fn plain_hunk_headers(
+    fixture: &FixtureRepo,
+    clone: &std::path::Path,
+    from: &str,
+    to: &str,
+    locale: &str,
+) -> Vec<String> {
+    let home = fixture.path().join("home");
+    let output = Command::new("git")
+        .current_dir(clone)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
+        .env("LC_ALL", locale)
+        .args(["diff", from, to])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    hunk_headers(&output.stdout)
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn diff_uses_default_ascii_hunk_headers_in_every_locale() {
+    let fixture = FixtureRepo::new();
+    fixture.write(".gitattributes", "*.c diff=default\n");
+    fixture.write(
+        "headers.c",
+        "int alpha(void)\n{\n    return 0;\n}\n\n\n\n\n\n\n_under\n{\n    return 0;\n}\n\n\n\n\n\n\n$dollar\n{\n    return 0;\n}\n\n\n\n\n\n\nlong_function_with_an_intentionally_very_long_name_that_is_more_than_eighty_characters_to_cover_header_length(void)\n{\n    return 0;\n}\n\n\n\n\n\n\nÜber_fn(x)\n{\n    return 0;\n}\n",
+    );
+    let from = fixture.commit("before");
+    fixture.write(
+        "headers.c",
+        "int alpha(void)\n{\n    return 1;\n}\n\n\n\n\n\n\n_under\n{\n    return 1;\n}\n\n\n\n\n\n\n$dollar\n{\n    return 1;\n}\n\n\n\n\n\n\nlong_function_with_an_intentionally_very_long_name_that_is_more_than_eighty_characters_to_cover_header_length(void)\n{\n    return 1;\n}\n\n\n\n\n\n\nÜber_fn(x)\n{\n    return 1;\n}\n",
+    );
+    let to = fixture.commit("after");
+    fixture.push("main");
+    let clone = fixture.clone("clone");
+    let spec = DiffSpec::TwoDot {
+        from: from.clone(),
+        to: to.clone(),
+        paths: vec![],
+    };
+
+    for locale in ["C", "C.UTF-8"] {
+        let actual = fixture
+            .git(&clone)
+            .env("LC_ALL", locale)
+            .diff(&spec)
+            .unwrap();
+        let expected = plain_hunk_headers(&fixture, &clone, &from, &to, locale);
+        let headers = hunk_headers(&actual);
+        assert_eq!(headers, expected, "{locale}");
+        assert!(
+            headers
+                .iter()
+                .any(|header| header.contains("int alpha(void)"))
+        );
+        assert!(headers.iter().any(|header| header.contains("_under")));
+        assert!(headers.iter().any(|header| header.contains("$dollar")));
+        assert!(
+            headers
+                .iter()
+                .any(|header| header.contains("long_function_with"))
+        );
+        assert!(!headers.iter().any(|header| header.contains("Über_fn(x)")));
+    }
 }
 
 #[test]

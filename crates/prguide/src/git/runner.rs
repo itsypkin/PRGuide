@@ -509,7 +509,7 @@ impl DiffSpec {
             "-c".into(),
             "diff.default.binary=auto".into(),
             "-c".into(),
-            "diff.default.xfuncname=^$".into(),
+            "diff.default.xfuncname=^[A-Za-z_$].*".into(),
             "-c".into(),
             "attr.tree=4b825dc642cb6eb9a060e54bf8d69288fbee4904".into(),
             "diff".into(),
