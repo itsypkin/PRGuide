@@ -469,6 +469,13 @@ fn plain_hunk_headers(
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
         .env("LC_ALL", locale)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_NAMESPACE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
         .args(["diff", from, to])
         .output()
         .unwrap();
@@ -489,12 +496,12 @@ fn diff_uses_default_ascii_hunk_headers_in_every_locale() {
     fixture.write(".gitattributes", "*.c diff=default\n");
     fixture.write(
         "headers.c",
-        "int alpha(void)\n{\n    return 0;\n}\n\n\n\n\n\n\n_under\n{\n    return 0;\n}\n\n\n\n\n\n\n$dollar\n{\n    return 0;\n}\n\n\n\n\n\n\nlong_function_with_an_intentionally_very_long_name_that_is_more_than_eighty_characters_to_cover_header_length(void)\n{\n    return 0;\n}\n\n\n\n\n\n\nÜber_fn(x)\n{\n    return 0;\n}\n",
+        "int alpha(void)\n{\n    return 0;\n}\n\n\n\n\n\n\n_under\n{\n    return 0;\n}\n\n\n\n\n\n\n$dollar\n{\n    return 0;\n}\n\n\n\n\n\n\nlong_function_with_an_intentionally_very_long_name_that_is_more_than_eighty_characters_to_cover_header_length(void)\n{\n    return 0;\n}\n\n\n\n\n\n\nÜber_fn(x)\n{\n    one();\n    two();\n    three();\n    four();\n    return 0;\n}\n",
     );
     let from = fixture.commit("before");
     fixture.write(
         "headers.c",
-        "int alpha(void)\n{\n    return 1;\n}\n\n\n\n\n\n\n_under\n{\n    return 1;\n}\n\n\n\n\n\n\n$dollar\n{\n    return 1;\n}\n\n\n\n\n\n\nlong_function_with_an_intentionally_very_long_name_that_is_more_than_eighty_characters_to_cover_header_length(void)\n{\n    return 1;\n}\n\n\n\n\n\n\nÜber_fn(x)\n{\n    return 1;\n}\n",
+        "int alpha(void)\n{\n    return 1;\n}\n\n\n\n\n\n\n_under\n{\n    return 1;\n}\n\n\n\n\n\n\n$dollar\n{\n    return 1;\n}\n\n\n\n\n\n\nlong_function_with_an_intentionally_very_long_name_that_is_more_than_eighty_characters_to_cover_header_length(void)\n{\n    return 1;\n}\n\n\n\n\n\n\nÜber_fn(x)\n{\n    one();\n    two();\n    three();\n    four();\n    return 1;\n}\n",
     );
     let to = fixture.commit("after");
     fixture.push("main");
