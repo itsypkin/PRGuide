@@ -599,3 +599,16 @@ fn unclosed_front_matter_is_unsupported() {
     );
     assert_eq!(e.code(), "render_unsupported");
 }
+
+#[test]
+fn opener_before_header_with_later_closer_still_flips() {
+    let src = "%%{ x\ngraph LR\n  A-->B\n  %% end }%%\n";
+    let plain = ok(src, &opts(Charset::Unicode));
+    let d = ok(src, &flipped(Charset::Unicode));
+    assert!(d.direction_overridden);
+    assert!(d.height > plain.height);
+    assert_eq!(
+        rewrite_root_direction(src, RootDirection::TopDown),
+        "%%{ x\ngraph TD\n  A-->B\n  %% end }%%\n"
+    );
+}

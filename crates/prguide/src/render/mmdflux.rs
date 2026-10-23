@@ -98,7 +98,7 @@ fn pipeline(src: &str, opts: &RenderOpts) -> Result<TextDiagram, RenderError> {
 
 /// Explains why mmdflux's registry did not recognise the source.
 fn classify_undetected(src: &str) -> RenderError {
-    let Some(header) = find_header(src) else {
+    let Some(header) = find_header(src, true) else {
         return RenderError::Invalid("empty diagram: no diagram type line".to_string());
     };
     let kind = kind_of(header.line);
@@ -179,7 +179,7 @@ struct Header<'a> {
 }
 
 /// Finds the first line that is not front matter, blank, a comment or a directive.
-fn find_header(src: &str) -> Option<Header<'_>> {
+fn find_header(src: &str, swallow_directives: bool) -> Option<Header<'_>> {
     let mut lines: Vec<(usize, &str)> = Vec::new();
     let mut offset = 0;
     for line in src.split_inclusive('\n') {
@@ -202,7 +202,7 @@ fn find_header(src: &str) -> Option<Header<'_>> {
     while i < lines.len() {
         let (offset, line) = lines[i];
         let t = line.trim();
-        if t.starts_with("%%{") && !t.ends_with("}%%") {
+        if swallow_directives && t.starts_with("%%{") && !t.ends_with("}%%") {
             // mmdflux treats an opener that never closes as a plain comment line.
             match lines[i + 1..]
                 .iter()
@@ -238,13 +238,13 @@ fn kind_of(line: &str) -> String {
 
 /// Names the diagram kind for errors; `None` when there is no header line.
 fn first_keyword(src: &str) -> Option<String> {
-    find_header(src).map(|h| kind_of(h.line))
+    find_header(src, true).map(|h| kind_of(h.line))
 }
 
 /// Rewrites a root `LR`/`RL` direction to `TD`; everything else stays byte-identical.
 pub fn rewrite_root_direction(src: &str, dir: RootDirection) -> Cow<'_, str> {
     let RootDirection::TopDown = dir;
-    let Some(header) = find_header(src) else {
+    let Some(header) = find_header(src, false) else {
         return Cow::Borrowed(src);
     };
     let line = header.line;
