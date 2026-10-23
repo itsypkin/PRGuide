@@ -319,6 +319,8 @@ fn unknown_header_and_binary_lines_are_rejected() {
     ] {
         assert_eq!(parse_error(input).0, line);
     }
+    let (_, message) = parse_error(b"diff --git a/x b/x\ncopy from x\n");
+    assert_eq!(message, "unknown line");
     for line in [
         b"Binary files a/x and b/x differ".as_slice(),
         b"Binary files /dev/null and b/x differ",
