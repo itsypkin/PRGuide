@@ -3,11 +3,75 @@ mod support;
 use prguide::{
     git::{
         DiffSpec, GitError,
-        diff::{FileStatus, LineKind, parse},
+        diff::{FileDiff, FileStatus, LineKind, parse},
     },
     guide::range::{Selection, Snapshot},
 };
 use support::fixture_repo::FixtureRepo;
+
+fn snapshot_files(files: &[FileDiff]) -> String {
+    use std::fmt::Write;
+
+    fn bytes(bytes: &[u8]) -> String {
+        format!("\"{}\"", bytes.escape_ascii())
+    }
+
+    let mut result = String::new();
+    for file in files {
+        let _ = writeln!(result, "path: {}", bytes(file.path.as_bytes()));
+        let _ = writeln!(
+            result,
+            "old_path: {}",
+            file.old_path
+                .as_ref()
+                .map(|path| bytes(path.as_bytes()))
+                .unwrap_or_else(|| "none".into())
+        );
+        let _ = writeln!(result, "status: {:?}", file.status);
+        let _ = writeln!(
+            result,
+            "modes: {} -> {}",
+            file.old_mode
+                .map(|mode| format!("{mode:06o}"))
+                .unwrap_or_else(|| "none".into()),
+            file.new_mode
+                .map(|mode| format!("{mode:06o}"))
+                .unwrap_or_else(|| "none".into())
+        );
+        let _ = writeln!(result, "oids: {:?} -> {:?}", file.old_oid, file.new_oid);
+        let _ = writeln!(result, "similarity: {:?}", file.similarity);
+        let _ = writeln!(
+            result,
+            "binary: {}, mode_only: {}, submodule: {}",
+            file.binary, file.mode_only, file.submodule
+        );
+        for hunk in &file.hunks {
+            let _ = writeln!(
+                result,
+                "hunk: -{},{} +{},{} section: {}",
+                hunk.old_start,
+                hunk.old_lines,
+                hunk.new_start,
+                hunk.new_lines,
+                hunk.section
+                    .as_deref()
+                    .map(bytes)
+                    .unwrap_or_else(|| "none".into())
+            );
+            for line in &hunk.lines {
+                let _ = writeln!(
+                    result,
+                    "  {:?}: {} no_newline: {}",
+                    line.kind,
+                    bytes(&line.text),
+                    line.no_newline
+                );
+            }
+        }
+        result.push('\n');
+    }
+    result
+}
 
 fn parse_error(input: &[u8]) -> (usize, String) {
     match parse(input).unwrap_err() {
@@ -122,7 +186,7 @@ fn real_diff_parses_rename_binary_and_mode_only() {
         .find(|file| file.path.as_bytes() == b"chmod")
         .unwrap();
     assert!(chmod.mode_only);
-    insta::assert_snapshot!(format!("{files:#?}"));
+    insta::assert_snapshot!(snapshot_files(&files));
 }
 
 #[test]
@@ -816,7 +880,7 @@ fn real_every_file_kind() {
             .count()
             == 2
     );
-    insta::assert_snapshot!(format!("{files:#?}"));
+    insta::assert_snapshot!(snapshot_files(&files));
 }
 
 #[cfg(unix)]
@@ -1094,10 +1158,16 @@ fn range_not_consecutive_checks_merges_before_chains() {
     let snapshot = Snapshot::new(&git, &merge, "main").unwrap();
     let commits = vec![p1.clone(), x.clone(), p2.clone(), merge.clone()];
     for (first, last) in [(x.clone(), p2.clone()), (p1.clone(), x.clone())] {
-        let error = Selection::Commits { first, last }
-            .resolve(&git, &snapshot, &commits)
-            .unwrap_err();
+        let error = Selection::Commits {
+            first: first.clone(),
+            last: last.clone(),
+        }
+        .resolve(&git, &snapshot, &commits)
+        .unwrap_err();
         assert_eq!(error.code(), "range_not_in_pr");
+        let message = error.to_string();
+        assert!(message.contains(&first));
+        assert!(message.contains(&last));
     }
     let merge_error = Selection::Commits {
         first: x,
