@@ -1,0 +1,12 @@
+sequenceDiagram
+  participant A as Agent
+  participant P as prguide
+  A->>P: start
+  alt ok
+    P-->>A: event
+  else failed
+    P-->>A: error
+  end
+  loop every event
+    A->>P: ack
+  end

@@ -1,0 +1,14 @@
+flowchart TD
+  subgraph cli [CLI]
+    start[prguide start]
+    view[prg viewer]
+  end
+  subgraph core [Core]
+    subgraph storage [Storage]
+      db[(SQLite store)]
+    end
+    guide[Guide model]
+  end
+  start -->|writes| guide
+  view -->|reads| guide
+  guide -->|persists| db

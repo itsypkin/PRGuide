@@ -1,0 +1,26 @@
+---
+source: crates/prguide/tests/render.rs
+expression: snap(&d)
+---
+10x21
+ +-------+
+ | Parse |
+ +-------+
+     |
+     |
+     v
+ +------+
+ | Plan |
+ +------+
+     |
+     |
+     v
++--------+
+| Render |
++--------+
+     |
+     |
+     v
+ +------+
+ | Show |
+ +------+
