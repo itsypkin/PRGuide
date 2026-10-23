@@ -1,0 +1,12 @@
+flowchart LR
+  subgraph app [App]
+    ui[UI] --> api[API]
+  end
+  subgraph infra [Infra]
+    q[Queue]
+    w[Worker]
+  end
+  api --> q
+  q --> w
+  w -->|result| ui
+  app --> infra

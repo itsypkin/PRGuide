@@ -1,0 +1,15 @@
+---
+title: graph LR
+---
+%% graph LR in a comment
+%%{init: {"theme":"dark"}}%%
+flowchart LR
+  subgraph s1 [Inner]
+    direction LR
+    X --> Y
+  end
+  subgraph s2 [Other]
+    direction RL
+    P --> Q
+  end
+  A --> s1 --> s2
