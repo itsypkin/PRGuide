@@ -568,6 +568,32 @@ fn diff_resolves_ref_names_and_ignores_all_pr_attributes() {
 }
 
 #[test]
+fn diff_ignores_index_only_attributes() {
+    let fixture = FixtureRepo::new();
+    fixture.write("data.json", "{\"old\": true}\n");
+    let from = fixture.commit("before");
+    fixture.write("data.json", "{\"new\": true}\n");
+    let to = fixture.commit("after");
+    fixture.push("main");
+    let clone = fixture.clone("clone");
+    let spec = DiffSpec::TwoDot {
+        from,
+        to,
+        paths: vec![],
+    };
+    let baseline = fixture.git(&clone).diff(&spec).unwrap();
+    fs::write(clone.join(".gitattributes"), "*.json -diff\n").unwrap();
+    fixture.run(&clone, ["add", ".gitattributes"]);
+    let isolated = fixture.git(&clone).diff(&spec).unwrap();
+    assert_eq!(baseline, isolated);
+    let ordinary = fixture.run(&clone, ["diff", "main~1", "main"]);
+    assert!(
+        ordinary.contains("Binary files"),
+        "plain git diff must demonstrate that the staged attributes apply"
+    );
+}
+
+#[test]
 fn diff_works_in_blobless_clone_with_or_without_attributes() {
     for attributes in [false, true] {
         let fixture = FixtureRepo::new();
