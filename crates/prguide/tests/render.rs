@@ -543,3 +543,31 @@ fn unsupported_kind_is_truncated() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn width_counts_cells_not_chars_on_the_widest_line() {
+    // The edge label sticks out past both boxes, so the widest line is the label line.
+    let src = "graph TD\n  A --> B\n  A -->|数据库数据库数据库数据库| B\n";
+    let d = ok(src, &opts(Charset::Unicode));
+    let max_chars = d.lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let widest = d
+        .lines
+        .iter()
+        .find(|l| l.contains("数据库数据库"))
+        .expect("label line");
+    assert_eq!(
+        d.width,
+        d.lines
+            .iter()
+            .map(|l| Line::raw(l.as_str()).width())
+            .max()
+            .unwrap_or(0)
+    );
+    assert!(
+        d.width > max_chars,
+        "{}x{} chars {max_chars}\n{}",
+        d.width,
+        d.height,
+        widest
+    );
+}
