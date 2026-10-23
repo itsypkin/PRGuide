@@ -389,6 +389,13 @@ fn rewrite_root_direction_cases() {
         ("\tgraph   LR;A-->B\n", "\tgraph   TD;A-->B\n"),
         ("graph LR; A[LR] --> B\n", "graph TD; A[LR] --> B\n"),
         ("graph LR\r\n  A --> B\r\n", "graph TD\r\n  A --> B\r\n"),
+        ("graph LR", "graph TD"),
+        ("graph LR A-->B\n", "graph TD A-->B\n"),
+        ("graph LR\tA-->B\n", "graph TD\tA-->B\n"),
+        (
+            "%%{ note\ngraph LR\n  A-->B\n",
+            "%%{ note\ngraph TD\n  A-->B\n",
+        ),
     ] {
         let r = rewrite_root_direction(src, td);
         assert!(matches!(r, Cow::Owned(_)), "{src:?}");
@@ -401,6 +408,9 @@ fn rewrite_root_direction_cases() {
         "graph\n",
         "sequenceDiagram\n  A->>B: LR\n",
         "graph LRX\n",
+        "",
+        "%% c\n",
+        "---\ntitle: x\ngraph LR\n  A-->B\n",
         "flowchart TD\n  subgraph s\n    direction LR\n    A --> B\n  end\n",
     ] {
         let r = rewrite_root_direction(src, td);
@@ -570,4 +580,22 @@ fn width_counts_cells_not_chars_on_the_widest_line() {
         d.height,
         widest
     );
+}
+
+#[test]
+fn unclosed_directive_opener_is_a_comment_and_override_applies() {
+    let src = "%%{ note\ngraph LR\n  A-->B\n";
+    let plain = ok(src, &opts(Charset::Unicode));
+    let d = ok(src, &flipped(Charset::Unicode));
+    assert!(d.direction_overridden);
+    assert!(d.height > plain.height);
+}
+
+#[test]
+fn unclosed_front_matter_is_unsupported() {
+    let e = err(
+        "---\ntitle: x\ngraph LR\n  A-->B\n",
+        &opts(Charset::Unicode),
+    );
+    assert_eq!(e.code(), "render_unsupported");
 }

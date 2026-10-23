@@ -203,12 +203,17 @@ fn find_header(src: &str) -> Option<Header<'_>> {
         let (offset, line) = lines[i];
         let t = line.trim();
         if t.starts_with("%%{") && !t.ends_with("}%%") {
-            multiline_directive = true;
-            i += 1;
-            while i < lines.len() && !lines[i].1.trim().ends_with("}%%") {
-                i += 1;
+            // mmdflux treats an opener that never closes as a plain comment line.
+            match lines[i + 1..]
+                .iter()
+                .position(|(_, l)| l.trim().ends_with("}%%"))
+            {
+                Some(close) => {
+                    multiline_directive = true;
+                    i += close + 2;
+                }
+                None => i += 1,
             }
-            i += 1;
         } else if t.is_empty() || t.starts_with("%%") {
             i += 1;
         } else {
@@ -273,4 +278,16 @@ pub fn rewrite_root_direction(src: &str, dir: RootDirection) -> Cow<'_, str> {
     out.push_str("TD");
     out.push_str(&src[at + 2..]);
     Cow::Owned(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::panic_message;
+
+    #[test]
+    fn panic_message_covers_every_payload_kind() {
+        assert_eq!(panic_message(&"a"), "a");
+        assert_eq!(panic_message(&String::from("b")), "b");
+        assert_eq!(panic_message(&1u8), "unknown panic payload");
+    }
 }
