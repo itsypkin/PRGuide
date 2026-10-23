@@ -6,7 +6,11 @@ use std::{
     thread,
 };
 
-use prguide::store::{PrRef, Store, StoreError, resolve_home};
+use prguide::store::Clock;
+use prguide::store::{
+    FakeClock, PrRef, Store, StoreError, SystemClock, Timestamp, resolve_home,
+    runs::{self, EndReason, RunId, RunState, StopReason},
+};
 use rusqlite::{Connection, ErrorCode};
 use tempfile::tempdir;
 
@@ -270,10 +274,10 @@ fn partial_unique_indexes_enforce_insert_and_update_rules() -> Result<(), StoreE
             "INSERT INTO runs VALUES ('active-3','active','t','t',NULL,NULL)",
             [],
         )?;
-        for id in ["done-1", "done-2", "failed"] {
+        for (id, state) in [("done-1", "done"), ("done-2", "done"), ("failed", "failed")] {
             tx.execute(
-                "INSERT INTO posts VALUES (?1,'done','h','{}',NULL,NULL,'t','t')",
-                [id],
+                "INSERT INTO posts VALUES (?1,?2,'h','{}',NULL,NULL,'t','t')",
+                [id, state],
             )?;
         }
         tx.execute(
@@ -588,4 +592,580 @@ fn concurrent_fresh_opens_succeed() -> Result<(), StoreError> {
         assert_eq!(objects(&mut store)?, expected_objects());
     }
     Ok(())
+}
+
+// ---- runs and the lease ----
+
+const T0: i64 = 1_792_713_600_000;
+const MIN: i64 = 60_000;
+
+fn at(ms: i64) -> Timestamp {
+    Timestamp::from_unix_millis(ms)
+}
+
+fn setup() -> (tempfile::TempDir, Store, Arc<FakeClock>) {
+    let temp = tempdir().expect("tempdir");
+    let clock = Arc::new(FakeClock::new(at(T0)));
+    let store = Store::open_in(temp.path(), &pr())
+        .expect("open")
+        .with_clock(clock.clone());
+    (temp, store, clock)
+}
+
+type RunRow = (String, String, String, Option<String>, Option<String>);
+
+fn run_row(store: &mut Store, id: &RunId) -> RunRow {
+    store
+        .tx(|tx| {
+            tx.query_row(
+                "SELECT state, created_at, lease_until, ended_at, end_reason FROM runs WHERE id = ?1",
+                [id.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .map_err(StoreError::from)
+        })
+        .expect("run row")
+}
+
+fn run_count(store: &mut Store) -> i64 {
+    store
+        .tx(|tx| {
+            tx.query_row("SELECT count(*) FROM runs", [], |r| r.get(0))
+                .map_err(StoreError::from)
+        })
+        .expect("count")
+}
+
+type EventRow = (String, Option<String>, Option<String>);
+
+fn event_row(store: &mut Store, id: &str) -> EventRow {
+    store
+        .tx(|tx| {
+            tx.query_row(
+                "SELECT state, claimed_by, claimed_at FROM events WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .map_err(StoreError::from)
+        })
+        .expect("event row")
+}
+
+fn add_event(store: &mut Store, id: &str, state: &str, by: Option<&RunId>) {
+    store
+        .tx(|tx| {
+            tx.execute(
+                "INSERT INTO events (id,type,state,claimed_by,claimed_at,created_at) \
+                 VALUES (?1,'comment',?2,?3,?4,'t')",
+                rusqlite::params![id, state, by.map(|r| r.as_str()), by.map(|_| "t")],
+            )
+            .map_err(StoreError::from)
+        })
+        .expect("add event");
+}
+
+fn add_stopped_run(store: &mut Store, id: &str) {
+    store
+        .tx(|tx| {
+            tx.execute(
+                "INSERT INTO runs VALUES (?1,'stopped','t','t','t','quit')",
+                [id],
+            )
+            .map_err(StoreError::from)
+        })
+        .expect("stopped run");
+}
+
+fn assert_pending(store: &mut Store, id: &str) {
+    assert_eq!(event_row(store, id), ("pending".into(), None, None));
+}
+
+fn code<T: std::fmt::Debug>(r: Result<T, StoreError>) -> &'static str {
+    r.expect_err("expected an error").code()
+}
+
+fn start_claimed(store: &mut Store) -> RunId {
+    let a = runs::start_run(store, false).expect("start").id;
+    add_event(store, "e1", "claimed", Some(&a));
+    a
+}
+
+fn inject(temp: &tempfile::TempDir, sql: &str) {
+    let dir = temp.path().join("prs/github.com/octo/repo/42/store.db");
+    let conn = Connection::open(dir).expect("raw conn");
+    conn.execute_batch(sql).expect("trigger");
+}
+
+const T_RELEASE: &str = "CREATE TRIGGER fail_release BEFORE UPDATE OF state ON events \
+  WHEN NEW.state = 'pending' BEGIN SELECT RAISE(ABORT, 'injected'); END;";
+const T_RUN: &str = "CREATE TRIGGER fail_run BEFORE UPDATE ON runs \
+  WHEN NEW.state <> 'active' BEGIN SELECT RAISE(ABORT, 'injected'); END;";
+const T_INSERT: &str = "CREATE TRIGGER fail_insert BEFORE INSERT ON runs \
+  BEGIN SELECT RAISE(ABORT, 'injected'); END;";
+
+#[test]
+fn start_then_run_active_then_takeover() {
+    let (_t, mut store, clock) = setup();
+    let a = runs::start_run(&mut store, false).expect("start");
+    assert_eq!(a.state, RunState::Active);
+    assert_eq!(a.created_at, "2026-10-23T00:00:00.000Z");
+    assert_eq!(a.lease_until, "2026-10-23T00:30:00.000Z");
+    assert_eq!(
+        run_row(&mut store, &a.id),
+        (
+            "active".into(),
+            "2026-10-23T00:00:00.000Z".into(),
+            "2026-10-23T00:30:00.000Z".into(),
+            None,
+            None
+        )
+    );
+    add_event(&mut store, "e1", "claimed", Some(&a.id));
+    clock.set(at(T0 + MIN));
+    let err = runs::start_run(&mut store, false).expect_err("active");
+    assert_eq!(err.code(), "run_active");
+    assert!(matches!(&err, StoreError::RunActive { run_id } if run_id == a.id.as_str()));
+    assert!(err.to_string().contains(a.id.as_str()));
+    assert_eq!(run_count(&mut store), 1);
+    assert_eq!(run_row(&mut store, &a.id).2, "2026-10-23T00:30:00.000Z");
+    let b = runs::start_run(&mut store, true).expect("takeover");
+    assert_ne!(a.id, b.id);
+    assert_eq!(b.state, RunState::Active);
+    assert_eq!(b.lease_until, "2026-10-23T00:31:00.000Z");
+    assert_eq!(
+        run_row(&mut store, &a.id),
+        (
+            "stopped".into(),
+            "2026-10-23T00:00:00.000Z".into(),
+            "2026-10-23T00:30:00.000Z".into(),
+            Some("2026-10-23T00:01:00.000Z".into()),
+            Some("takeover".into())
+        )
+    );
+    assert_eq!(
+        run_row(&mut store, &b.id),
+        (
+            "active".into(),
+            "2026-10-23T00:01:00.000Z".into(),
+            "2026-10-23T00:31:00.000Z".into(),
+            None,
+            None
+        )
+    );
+    assert_pending(&mut store, "e1");
+    assert_eq!(code(runs::require_active(&mut store, &a.id)), "run_stopped");
+}
+
+#[test]
+fn undecodable_run_rows_are_store_sqlite() {
+    let (t, mut store, _clock) = setup();
+    inject(
+        &t,
+        "PRAGMA ignore_check_constraints=ON; \
+         INSERT INTO runs VALUES('r_badstate','bogus','t','t',NULL,NULL); \
+         INSERT INTO runs VALUES('r_badreason','stopped','t','t','t','bogus');",
+    );
+    for id in ["r_badstate", "r_badreason"] {
+        assert_eq!(
+            code(runs::require_active(&mut store, &RunId::new(id))),
+            "store_sqlite"
+        );
+    }
+}
+
+#[test]
+fn vanishing_rows_after_a_write_are_store_sqlite() {
+    // start_run: the new row is deleted right after the insert.
+    let (t, mut store, _c) = setup();
+    inject(
+        &t,
+        "CREATE TRIGGER vanish AFTER INSERT ON runs BEGIN DELETE FROM runs WHERE id = NEW.id; END;",
+    );
+    assert_eq!(code(runs::start_run(&mut store, false)), "store_sqlite");
+    assert_eq!(run_count(&mut store), 0);
+
+    // gate renewal: the row is deleted right after the lease update.
+    let (t, mut store, _c) = setup();
+    let a = runs::start_run(&mut store, false).expect("start").id;
+    inject(
+        &t,
+        "CREATE TRIGGER vanish AFTER UPDATE OF lease_until ON runs BEGIN DELETE FROM runs WHERE id = NEW.id; END;",
+    );
+    assert_eq!(code(runs::require_active(&mut store, &a)), "store_sqlite");
+    assert_eq!(run_count(&mut store), 1);
+
+    // end_run: the row is deleted right after the state update.
+    let (t, mut store, _c) = setup();
+    let a = runs::start_run(&mut store, false).expect("start").id;
+    inject(
+        &t,
+        "CREATE TRIGGER vanish AFTER UPDATE OF state ON runs BEGIN DELETE FROM runs WHERE id = NEW.id; END;",
+    );
+    assert_eq!(
+        code(runs::stop_run(&mut store, &a, StopReason::End)),
+        "store_sqlite"
+    );
+    assert_eq!(run_count(&mut store), 1);
+}
+
+#[test]
+fn calls_after_stop_return_run_stopped() {
+    let (_t, mut store, clock) = setup();
+    let a = start_claimed(&mut store);
+    add_event(&mut store, "e2", "done", Some(&a));
+    clock.set(at(T0 + 5 * MIN));
+    let run = runs::stop_run(&mut store, &a, StopReason::End).expect("stop");
+    assert_eq!(run.state, RunState::Stopped);
+    assert_eq!(run.end_reason, Some(EndReason::End));
+    assert_eq!(run.ended_at.as_deref(), Some("2026-10-23T00:05:00.000Z"));
+    let row = run_row(&mut store, &a);
+    assert_eq!(
+        row,
+        (
+            "stopped".into(),
+            "2026-10-23T00:00:00.000Z".into(),
+            "2026-10-23T00:30:00.000Z".into(),
+            Some("2026-10-23T00:05:00.000Z".into()),
+            Some("end".into())
+        )
+    );
+    assert_pending(&mut store, "e1");
+    assert_eq!(
+        event_row(&mut store, "e2"),
+        ("done".into(), Some(a.to_string()), Some("t".into()))
+    );
+    clock.set(at(T0 + 10 * MIN));
+    assert_eq!(code(runs::require_active(&mut store, &a)), "run_stopped");
+    assert_eq!(
+        code(runs::stop_run(&mut store, &a, StopReason::Quit)),
+        "run_stopped"
+    );
+    assert_eq!(run_row(&mut store, &a), row);
+    let b = runs::start_run(&mut store, false).expect("start b").id;
+    runs::stop_run(&mut store, &b, StopReason::Quit).expect("quit");
+    assert_eq!(run_row(&mut store, &b).4.as_deref(), Some("quit"));
+}
+
+#[test]
+fn fake_clock_expires_run_and_releases_claims() {
+    let (_t, mut store, clock) = setup();
+    let a = start_claimed(&mut store);
+    add_event(&mut store, "e2", "done", Some(&a));
+    add_event(&mut store, "e3", "pending", None);
+    add_stopped_run(&mut store, "x");
+    add_event(&mut store, "e4", "claimed", Some(&RunId::new("x")));
+    clock.set(at(T0 + 30 * MIN));
+    assert_eq!(code(runs::require_active(&mut store, &a)), "run_stopped");
+    let row = (
+        "expired".to_string(),
+        "2026-10-23T00:00:00.000Z".to_string(),
+        "2026-10-23T00:30:00.000Z".to_string(),
+        Some("2026-10-23T00:30:00.000Z".to_string()),
+        Some("expired".to_string()),
+    );
+    assert_eq!(run_row(&mut store, &a), row);
+    assert_pending(&mut store, "e1");
+    assert_eq!(
+        event_row(&mut store, "e2"),
+        ("done".into(), Some(a.to_string()), Some("t".into()))
+    );
+    assert_pending(&mut store, "e3");
+    assert_eq!(
+        event_row(&mut store, "e4"),
+        ("claimed".into(), Some("x".into()), Some("t".into()))
+    );
+    clock.set(at(T0 + 40 * MIN));
+    assert_eq!(code(runs::require_active(&mut store, &a)), "run_stopped");
+    assert_eq!(run_row(&mut store, &a), row);
+}
+
+#[test]
+fn start_after_stopped_run_needs_no_takeover() {
+    let (_t, mut store, _c) = setup();
+    let a = runs::start_run(&mut store, false).expect("a").id;
+    runs::stop_run(&mut store, &a, StopReason::Quit).expect("stop");
+    let before = run_row(&mut store, &a);
+    let b = runs::start_run(&mut store, false).expect("b");
+    assert_ne!(a, b.id);
+    assert_eq!(b.state, RunState::Active);
+    assert_eq!(run_row(&mut store, &a), before);
+}
+
+#[test]
+fn expired_active_run_does_not_block_start() {
+    let (_t, mut store, clock) = setup();
+    let a = start_claimed(&mut store);
+    clock.set(at(T0 + 30 * MIN));
+    let b = runs::start_run(&mut store, false).expect("b");
+    assert_ne!(a, b.id);
+    let row = run_row(&mut store, &a);
+    assert_eq!(row.0, "expired");
+    assert_eq!(row.3.as_deref(), Some("2026-10-23T00:30:00.000Z"));
+    assert_eq!(row.4.as_deref(), Some("expired"));
+    assert_pending(&mut store, "e1");
+}
+
+#[test]
+fn takeover_of_a_lapsed_run_records_expired() {
+    let (_t, mut store, clock) = setup();
+    let a = start_claimed(&mut store);
+    clock.set(at(T0 + 30 * MIN));
+    runs::start_run(&mut store, true).expect("b");
+    let row = run_row(&mut store, &a);
+    assert_eq!(row.0, "expired");
+    assert_eq!(row.4.as_deref(), Some("expired"));
+    assert_pending(&mut store, "e1");
+}
+
+#[test]
+fn lease_valid_one_ms_before_lease_until() {
+    let (_t, mut store, clock) = setup();
+    let a = runs::start_run(&mut store, false).expect("a").id;
+    clock.set(at(T0 + 30 * MIN - 1));
+    let run = runs::require_active(&mut store, &a).expect("valid");
+    assert_eq!(run.state, RunState::Active);
+    assert_eq!(run.lease_until, "2026-10-23T00:59:59.999Z");
+    let row = run_row(&mut store, &a);
+    assert_eq!(row.0, "active");
+    assert_eq!(row.2, "2026-10-23T00:59:59.999Z");
+}
+
+#[test]
+fn start_blocked_until_the_lease_ends() {
+    let (_t, mut store, clock) = setup();
+    let a = runs::start_run(&mut store, false).expect("a").id;
+    clock.set(at(T0 + 30 * MIN - 1));
+    assert_eq!(code(runs::start_run(&mut store, false)), "run_active");
+    clock.set(at(T0 + 30 * MIN));
+    runs::start_run(&mut store, false).expect("b");
+    assert_eq!(run_row(&mut store, &a).0, "expired");
+}
+
+#[test]
+fn require_active_renews_the_lease() {
+    let (_t, mut store, clock) = setup();
+    let a = runs::start_run(&mut store, false).expect("a").id;
+    clock.set(at(T0 + 29 * MIN));
+    runs::require_active(&mut store, &a).expect("29m");
+    assert_eq!(run_row(&mut store, &a).2, "2026-10-23T00:59:00.000Z");
+    clock.set(at(T0 + 58 * MIN));
+    runs::require_active(&mut store, &a).expect("58m");
+    assert_eq!(run_row(&mut store, &a).2, "2026-10-23T01:28:00.000Z");
+    clock.set(at(T0 + 88 * MIN));
+    assert_eq!(code(runs::require_active(&mut store, &a)), "run_stopped");
+    assert_eq!(run_row(&mut store, &a).0, "expired");
+}
+
+fn atomic_case(
+    trigger: &str,
+    clock_at: i64,
+    op: impl Fn(&mut Store, &RunId) -> Result<(), StoreError>,
+    expect_runs: i64,
+) {
+    let (temp, mut store, clock) = setup();
+    let a = start_claimed(&mut store);
+    let before = run_row(&mut store, &a);
+    inject(&temp, trigger);
+    clock.set(at(clock_at));
+    let err = op(&mut store, &a).expect_err("injected failure");
+    assert_eq!(err.code(), "store_sqlite");
+    assert_eq!(run_row(&mut store, &a), before);
+    assert_eq!(before.0, "active");
+    assert_eq!(
+        event_row(&mut store, "e1"),
+        ("claimed".into(), Some(a.to_string()), Some("t".into()))
+    );
+    assert_eq!(run_count(&mut store), expect_runs);
+}
+
+#[test]
+fn stop_is_one_transaction() {
+    for trigger in [T_RELEASE, T_RUN] {
+        atomic_case(
+            trigger,
+            T0 + 5 * MIN,
+            |s, a| runs::stop_run(s, a, StopReason::End).map(|_| ()),
+            1,
+        );
+    }
+}
+
+#[test]
+fn expiry_is_one_transaction() {
+    for trigger in [T_RELEASE, T_RUN] {
+        atomic_case(
+            trigger,
+            T0 + 30 * MIN,
+            |s, a| runs::require_active(s, a).map(|_| ()),
+            1,
+        );
+    }
+}
+
+#[test]
+fn takeover_is_one_transaction() {
+    for trigger in [T_RELEASE, T_RUN, T_INSERT] {
+        atomic_case(
+            trigger,
+            T0 + 5 * MIN,
+            |s, _| runs::start_run(s, true).map(|_| ()),
+            1,
+        );
+    }
+}
+
+#[test]
+fn run_ids_are_r_and_12_lowercase_base32() {
+    let (_t, mut store, _c) = setup();
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..20 {
+        let id = runs::start_run(&mut store, false).expect("start").id;
+        let text = id.as_str();
+        assert_eq!(text.len(), 14);
+        assert!(text.starts_with("r_"));
+        assert!(
+            text[2..]
+                .chars()
+                .all(|c| "0123456789abcdefghjkmnpqrstvwxyz".contains(c))
+        );
+        assert!(seen.insert(text.to_owned()));
+        runs::stop_run(&mut store, &id, StopReason::Quit).expect("stop");
+    }
+}
+
+#[test]
+fn unknown_run_is_run_unknown() {
+    let (_t, mut store, _c) = setup();
+    let a = runs::start_run(&mut store, false).expect("a").id;
+    let before = run_row(&mut store, &a);
+    let ghost = RunId::new("r_000000000000");
+    for err in [
+        runs::require_active(&mut store, &ghost).expect_err("ghost"),
+        runs::stop_run(&mut store, &ghost, StopReason::End).expect_err("ghost"),
+    ] {
+        assert_eq!(err.code(), "run_unknown");
+        assert!(err.to_string().contains("r_000000000000"));
+    }
+    assert_eq!(run_row(&mut store, &a), before);
+}
+
+#[test]
+fn second_connection_sees_the_active_run() {
+    let temp = tempdir().expect("tempdir");
+    let clock = Arc::new(FakeClock::new(at(T0)));
+    let mut one = Store::open_in(temp.path(), &pr())
+        .expect("one")
+        .with_clock(clock.clone());
+    let mut two = Store::open_in(temp.path(), &pr())
+        .expect("two")
+        .with_clock(clock.clone());
+    let a = runs::start_run(&mut one, false).expect("a").id;
+    let err = runs::start_run(&mut two, false).expect_err("active");
+    assert!(matches!(&err, StoreError::RunActive { run_id } if run_id == a.as_str()));
+    let b = runs::start_run(&mut two, true).expect("b");
+    assert_ne!(a, b.id);
+    assert_eq!(code(runs::require_active(&mut one, &a)), "run_stopped");
+}
+
+#[test]
+fn active_run_and_expire_lapsed_on_read() {
+    let (_t, mut store, _c) = setup();
+    let a = start_claimed(&mut store);
+    let found = store
+        .tx(|tx| runs::active_run(tx, at(T0 + 10 * MIN)))
+        .expect("read")
+        .expect("active");
+    assert_eq!(found.id, a);
+    assert_eq!(found.lease_until, "2026-10-23T00:30:00.000Z");
+    assert_eq!(run_row(&mut store, &a).2, "2026-10-23T00:30:00.000Z");
+    let none = store
+        .tx(|tx| runs::active_run(tx, at(T0 + 30 * MIN)))
+        .expect("read");
+    assert!(none.is_none());
+    let row = run_row(&mut store, &a);
+    assert_eq!(row.0, "expired");
+    assert_pending(&mut store, "e1");
+    let again = store
+        .tx(|tx| runs::expire_lapsed(tx, at(T0 + 40 * MIN)))
+        .expect("again");
+    assert!(again.is_none());
+    assert_eq!(run_row(&mut store, &a), row);
+}
+
+#[test]
+fn stop_run_of_a_lapsed_run_expires_it() {
+    let (_t, mut store, clock) = setup();
+    let a = start_claimed(&mut store);
+    clock.set(at(T0 + 30 * MIN));
+    assert_eq!(
+        code(runs::stop_run(&mut store, &a, StopReason::End)),
+        "run_stopped"
+    );
+    let row = run_row(&mut store, &a);
+    assert_eq!(row.0, "expired");
+    assert_eq!(row.4.as_deref(), Some("expired"));
+    assert_pending(&mut store, "e1");
+}
+
+#[test]
+fn default_clock_is_the_system_clock() {
+    let temp = tempdir().expect("tempdir");
+    let mut store = Store::open_in(temp.path(), &pr()).expect("open");
+    let before = SystemClock.now().to_rfc3339();
+    let run = runs::start_run(&mut store, false).expect("start");
+    let after = SystemClock.now().to_rfc3339();
+    let created = run_row(&mut store, &run.id).1;
+    assert!(
+        before <= created && created <= after,
+        "{before} {created} {after}"
+    );
+}
+
+#[test]
+fn run_error_codes_are_stable() {
+    for (error, want) in [
+        (
+            StoreError::RunActive {
+                run_id: "r_a".into(),
+            },
+            "run_active",
+        ),
+        (
+            StoreError::RunStopped {
+                run_id: "r_a".into(),
+            },
+            "run_stopped",
+        ),
+        (
+            StoreError::RunUnknown {
+                run_id: "r_a".into(),
+            },
+            "run_unknown",
+        ),
+    ] {
+        assert_eq!(error.code(), want);
+        assert!(error.to_string().contains("r_a"));
+    }
+}
+
+#[test]
+fn schema_v1_snapshot() {
+    let temp = tempdir().expect("tempdir");
+    let mut store = Store::open_in(temp.path(), &pr()).expect("open");
+    let rows: Vec<(String, Option<String>)> = store
+        .tx(|tx| {
+            tx.prepare("SELECT name, sql FROM sqlite_master ORDER BY name")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(StoreError::from)
+        })
+        .expect("schema");
+    let mut text = String::new();
+    for (name, sql) in rows {
+        text.push_str(&format!(
+            "-- {name}\n{}\n",
+            sql.as_deref().unwrap_or("NULL")
+        ));
+    }
+    insta::assert_snapshot!("schema_v1_snapshot", text);
 }

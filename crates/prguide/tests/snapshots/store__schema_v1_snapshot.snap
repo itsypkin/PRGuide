@@ -1,0 +1,116 @@
+---
+source: crates/prguide/tests/store.rs
+expression: text
+---
+-- deepdive_sections
+CREATE TABLE deepdive_sections(id TEXT PRIMARY KEY,
+     deepdive_id TEXT NOT NULL REFERENCES deepdives(id),
+     ord INTEGER NOT NULL, body TEXT NOT NULL,
+     caused_by TEXT NOT NULL UNIQUE REFERENCES events(id),
+     created_at TEXT NOT NULL, UNIQUE (deepdive_id, ord))
+-- deepdives
+CREATE TABLE deepdives(id TEXT PRIMARY KEY,
+     version INTEGER NOT NULL REFERENCES guide_versions(version),
+     slide_id TEXT NOT NULL, created_at TEXT NOT NULL,
+     UNIQUE (version, slide_id))
+-- drafts
+CREATE TABLE drafts(id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id),
+     path TEXT NOT NULL, provenance_json TEXT NOT NULL, created_at TEXT NOT NULL)
+-- events
+CREATE TABLE events(seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+     type TEXT NOT NULL CHECK (type IN ('comment','deepdive_request','generate_request')),
+     state TEXT NOT NULL CHECK (state IN ('pending','claimed','done')),
+     claimed_by TEXT REFERENCES runs(id), claimed_at TEXT,
+     thread_id TEXT REFERENCES threads(id),      -- comment, deepdive_request
+     message_id TEXT REFERENCES messages(id),    -- comment
+     range_first TEXT, range_last TEXT,          -- generate_request; both NULL = full
+     result_kind TEXT CHECK (result_kind IN
+         ('message','deepdive_section','outbox_item','guide_version','ack')),  -- NULL until done
+     result_id TEXT, done_at TEXT,
+     created_at TEXT NOT NULL)
+-- events_open
+CREATE INDEX events_open ON events(state, seq)
+-- gh_threads
+CREATE TABLE gh_threads(id TEXT PRIMARY KEY, updated_at TEXT NOT NULL, json TEXT NOT NULL,
+     fetched_at TEXT NOT NULL)
+-- guide_versions
+CREATE TABLE guide_versions(version INTEGER PRIMARY KEY,
+     state TEXT NOT NULL CHECK (state IN ('staging','ready')),
+     caused_by TEXT UNIQUE REFERENCES events(id),
+     snapshot_base TEXT NOT NULL, snapshot_head TEXT NOT NULL,
+     selection_kind TEXT NOT NULL CHECK (selection_kind IN ('full','commits')),
+     selection_base TEXT NOT NULL, selection_head TEXT NOT NULL,
+     commits_json TEXT NOT NULL,                 -- ordered SHAs
+     refs_json TEXT NOT NULL,                    -- [{name, sha}] the version pins
+     created_at TEXT NOT NULL, ready_at TEXT)
+-- messages
+CREATE TABLE messages(id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES threads(id),
+     author TEXT NOT NULL CHECK (author IN ('reviewer','agent')),
+     body TEXT NOT NULL, created_at TEXT NOT NULL)
+-- notices
+CREATE TABLE notices(seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,   -- guide_ready
+     ref TEXT NOT NULL, created_at TEXT NOT NULL)
+-- one_active_run
+CREATE UNIQUE INDEX one_active_run ON runs(state) WHERE state = 'active'
+-- one_open_post
+CREATE UNIQUE INDEX one_open_post ON posts((1)) WHERE state IN ('in_flight','unknown')
+-- outbox_items
+CREATE TABLE outbox_items(id TEXT PRIMARY KEY,
+     kind TEXT NOT NULL CHECK (kind IN ('author_question','promoted_answer')),
+     thread_id TEXT NOT NULL REFERENCES threads(id),
+     message_id TEXT REFERENCES messages(id),    -- the promoted agent message
+     body TEXT NOT NULL,
+     state TEXT NOT NULL CHECK (state IN ('draft','dropped','posting','posted')),
+     post_id TEXT REFERENCES posts(id), gh_comment_id INTEGER,
+     created_at TEXT NOT NULL, updated_at TEXT NOT NULL)
+-- posts
+CREATE TABLE posts(id TEXT PRIMARY KEY,
+     state TEXT NOT NULL CHECK (state IN ('in_flight','unknown','done','failed')),
+     head_sha TEXT NOT NULL, plan_json TEXT NOT NULL,   -- T7-3's placement plan
+     gh_review_id INTEGER, error TEXT,
+     created_at TEXT NOT NULL, updated_at TEXT NOT NULL)
+-- runs
+CREATE TABLE runs(id TEXT PRIMARY KEY,          -- "r_" + 12 base32 chars
+     state TEXT NOT NULL CHECK (state IN ('active','stopped','expired')),
+     created_at TEXT NOT NULL, lease_until TEXT NOT NULL,
+     ended_at TEXT,
+     end_reason TEXT CHECK (end_reason IN ('quit','end','takeover','expired')))
+-- sqlite_autoindex_deepdive_sections_1
+NULL
+-- sqlite_autoindex_deepdive_sections_2
+NULL
+-- sqlite_autoindex_deepdive_sections_3
+NULL
+-- sqlite_autoindex_deepdives_1
+NULL
+-- sqlite_autoindex_deepdives_2
+NULL
+-- sqlite_autoindex_drafts_1
+NULL
+-- sqlite_autoindex_events_1
+NULL
+-- sqlite_autoindex_gh_threads_1
+NULL
+-- sqlite_autoindex_guide_versions_1
+NULL
+-- sqlite_autoindex_messages_1
+NULL
+-- sqlite_autoindex_outbox_items_1
+NULL
+-- sqlite_autoindex_posts_1
+NULL
+-- sqlite_autoindex_runs_1
+NULL
+-- sqlite_autoindex_store_meta_1
+NULL
+-- sqlite_autoindex_threads_1
+NULL
+-- sqlite_sequence
+CREATE TABLE sqlite_sequence(name,seq)
+-- store_meta
+CREATE TABLE store_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)
+-- threads
+CREATE TABLE threads(id TEXT PRIMARY KEY, created_at TEXT NOT NULL,
+     origin_version INTEGER NOT NULL REFERENCES guide_versions(version),
+     slide_id TEXT NOT NULL,
+     anchor_json TEXT)
