@@ -661,7 +661,7 @@ fn resolve_invalid_utf8_line_is_lossy_in_anchor() {
     let fx = FixtureRepo::new();
     fx.write("readme.txt", "hi\n");
     let base = fx.commit("base");
-    fx.write("bad.txt", b"ok\n\xff\xfe bad\nend\n".to_vec());
+    fx.write("bad.txt", b"ok\n\xff\xfe bad\nend\n");
     let head = fx.commit("head");
     let git = fx.git(fx.work_path());
     let cx = context(&fx, &base, &head, &[&head], Selection::Full);
