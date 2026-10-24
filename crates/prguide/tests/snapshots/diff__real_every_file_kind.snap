@@ -20,6 +20,14 @@ oids: Some("254834fe07f60f09b2bde27fd7734821dc328560") -> Some("2787a2631f3878ce
 similarity: Some(96)
 binary: true, mode_only: false, submodule: false
 
+path: "binary-added"
+old_path: none
+status: Added
+modes: none -> 100644
+oids: Some("0000000000000000000000000000000000000000") -> Some("486592b9e24e187753fca993a6d24b961c5e400c")
+similarity: None
+binary: true, mode_only: false, submodule: false
+
 path: "binary-deleted"
 old_path: none
 status: Deleted

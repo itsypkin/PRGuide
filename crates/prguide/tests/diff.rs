@@ -75,7 +75,10 @@ fn snapshot_files(files: &[FileDiff]) -> String {
 
 fn parse_error(input: &[u8]) -> (usize, String) {
     match parse(input).unwrap_err() {
-        GitError::DiffParse { line, message } => (line, message),
+        GitError::DiffParse { line, message } => {
+            assert!(!message.is_empty());
+            (line, message)
+        }
         error => panic!("expected diff parse error, got {error:?}"),
     }
 }
@@ -294,6 +297,40 @@ fn header_names_must_agree() {
     ] {
         assert_eq!(parse_error(input).0, line);
     }
+}
+
+#[test]
+fn header_validation_requires_paired_lines_and_matching_names() {
+    let rename_mismatch =
+        b"diff --git a/x b/q\nsimilarity index 100%\nrename from x\nrename to y\n";
+    assert_eq!(parse_error(rename_mismatch).0, 4);
+
+    let deleted_new_side = b"diff --git a/x b/x\ndeleted file mode 100644\n--- a/x\n+++ b/x\n";
+    assert_eq!(parse_error(deleted_new_side).0, 4);
+    let modified_new_side = b"diff --git a/x b/x\n--- a/x\n+++ b/y\n";
+    assert_eq!(parse_error(modified_new_side).0, 3);
+
+    let no_hunk = format!("diff --git a/x b/x\nindex {OID_A}..{OID_B}\n--- a/x\n+++ b/x\n");
+    assert_eq!(parse_error(no_hunk.as_bytes()).0, 5);
+    assert_eq!(parse_error(b"diff --git a/x b/x\n--- a/x\n").0, 3);
+
+    assert_eq!(parse_error(b"diff --git a/x b/x\nold mode 100644\n").0, 3);
+    let old_mode_then_index =
+        format!("diff --git a/x b/x\nold mode 100644\nindex {OID_A}..{OID_B}\n");
+    assert_eq!(parse_error(old_mode_then_index.as_bytes()).0, 3);
+
+    let no_rename_to = format!(
+        "diff --git a/x b/x\nsimilarity index 100%\nrename from x\nindex {OID_A}..{OID_B}\n"
+    );
+    assert_eq!(parse_error(no_rename_to.as_bytes()).0, 4);
+    assert_eq!(
+        parse_error(b"diff --git a/x b/x\nsimilarity index 100%\n").0,
+        3
+    );
+
+    let duplicate_index =
+        format!("diff --git a/x b/x\nindex {OID_A}..{OID_B}\nindex {OID_A}..{OID_B}\n");
+    assert_eq!(parse_error(duplicate_index.as_bytes()).0, 3);
 }
 
 #[test]
@@ -623,10 +660,16 @@ fn real_no_newline_markers_parse() {
 #[test]
 fn real_hunk_lookalikes_and_crlf_parse() {
     let fixture = FixtureRepo::new();
-    fixture.write("look", "-- a/x\n++ b/x\n");
+    fixture.write(
+        "look",
+        "-- a/x\n++ b/x\n@@ -1 +1 @@\ndiff --git a/x b/x\n\\ fake\n",
+    );
     fixture.write("crlf", b"a\r\nb\r\n");
     let base = fixture.commit("base");
-    fixture.write("look", "-- a/y\n++ b/y\n");
+    fixture.write(
+        "look",
+        "-- a/y\n++ b/y\n@@ -1 +1 @@\ndiff --git a/y b/y\n\\ fake\n",
+    );
     fixture.write("crlf", b"a\r\nB\r\n");
     let head = fixture.commit("change");
     let files = parse(
@@ -655,6 +698,10 @@ fn real_hunk_lookalikes_and_crlf_parse() {
             (LineKind::Removed, b"++ b/x".as_slice()),
             (LineKind::Added, b"-- a/y".as_slice()),
             (LineKind::Added, b"++ b/y".as_slice()),
+            (LineKind::Context, b"@@ -1 +1 @@".as_slice()),
+            (LineKind::Removed, b"diff --git a/x b/x".as_slice()),
+            (LineKind::Added, b"diff --git a/y b/y".as_slice()),
+            (LineKind::Context, b"\\ fake".as_slice()),
         ]
     );
     let crlf = files
@@ -766,6 +813,10 @@ fn merge_is_allowed_for_full_and_rejected_for_range() {
 fn noncanonical_octal_and_malformed_quoted_headers_are_rejected() {
     for input in [
         b"diff --git \"a/x\\351\" \"b/x\\351\"\nold mode 100644\nnew mode 100755\n".as_slice(),
+        b"diff --git \"a/x\\q\" \"b/x\\q\"\nold mode 100644\nnew mode 100755\n",
+        b"diff --git \"a/x\\4xx\" \"b/x\\4xx\"\nold mode 100644\nnew mode 100755\n",
+        b"diff --git \"a/x b/x\nold mode 100644\nnew mode 100755\n",
+        b"diff --git \"a/x\"junk b/x\nold mode 100644\nnew mode 100755\n",
         b"diff --git \"a/x\"b/x\nold mode 100644\nnew mode 100755\n",
         b"diff --git \"a/x\" \"b/x\" trailing\nold mode 100644\nnew mode 100755\n",
         b"diff --git a/x\" b/x\"\nold mode 100644\nnew mode 100755\n",
@@ -810,6 +861,7 @@ fn real_every_file_kind() {
     fixture.set_executable("edit-chmod", true);
     fixture.write("added", "added\n");
     fixture.write("empty-added", b"");
+    fixture.write("binary-added", b"added\0binary");
     fixture.write("binary-modified", b"new\0binary");
     fixture.remove("binary-deleted");
     let mut renamed_binary = vec![b'x'; 2048];
@@ -862,6 +914,8 @@ fn real_every_file_kind() {
     assert!(file(b"chmod").mode_only);
     assert!(!file(b"edit-chmod").mode_only);
     assert!(file(b"binary-modified").binary);
+    assert_eq!(file(b"binary-added").status, FileStatus::Added);
+    assert!(file(b"binary-added").binary);
     assert!(file(b"binary-deleted").binary);
     assert!(file(b"binary renamed").binary);
     assert!(!file(b"binchmod").mode_only);
