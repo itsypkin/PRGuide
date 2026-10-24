@@ -1010,7 +1010,15 @@ fn worktree_holds_blob_bytes_despite_attributes_and_filters() {
 
 #[test]
 fn hooks_never_run() {
-    let ctx = Ctx::from_shape(|fx| simple_shape(fx, &[("a.txt", "a\n")]));
+    let mut ctx = Ctx::from_shape(|fx| simple_shape(fx, &[("a.txt", "a\n")]));
+    // The second head is committed before any hook exists; it reaches the PR ref later through
+    // the bare remote with hooks switched off (the global hooks apply there too).
+    ctx.fx.write("b.txt", "b\n");
+    let newer = ctx.fx.commit("second");
+    ctx.fx.run(
+        ctx.fx.work_path(),
+        ["push", "origin", &format!("{newer}:refs/heads/second")],
+    );
     let fx = &ctx.fx;
     let tools = fx.path().join("tools");
     let marker = fx.path().join("hook-marker");
@@ -1060,6 +1068,20 @@ fn hooks_never_run() {
     ctx.stop(&first);
     fs::write(first.worktree.join("junk.txt"), "j\n").unwrap();
     fs::write(first.worktree.join("a.txt"), "changed\n").unwrap();
+    ctx.fx.run(
+        &ctx.fx.remote_path(),
+        [
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "hook.reference-transaction.enabled=false",
+            "update-ref",
+            "refs/pull/7/head",
+            &newer,
+        ],
+    );
+    ctx.publish(&newer);
+    ctx.head = newer.clone();
     let second = ctx.ok();
     // The fetch's own reference-transaction hook (refs/prguide/*) is a known residual; the test
     // hook ignores those refs, so any other ref name or any other hook file means a worktree
@@ -1215,7 +1237,10 @@ fn environment_config_and_hostile_variables_are_stripped() {
             .env("GIT_ICASE_PATHSPECS", "1")
             .env("GIT_GLOB_PATHSPECS", "1");
         git = if variant == "parameters" {
-            git.env("GIT_CONFIG_PARAMETERS", "'core.splitindex=true'")
+            git.env(
+                "GIT_CONFIG_PARAMETERS",
+                "'core.splitindex=true' 'index.version=4'",
+            )
         } else {
             git.env("GIT_CONFIG_COUNT", "1")
                 .env("GIT_CONFIG_KEY_0", "core.splitIndex")
@@ -1224,6 +1249,10 @@ fn environment_config_and_hostile_variables_are_stripped() {
         let before = state(&ctx.fx, &ctx.clone, &[]);
         let out = ctx.start_with(git, false).unwrap();
         assert_eq!(sharedindex(&ctx), Vec::<String>::new(), "{variant}");
+        // index.version=4 is a second visible effect, for git versions where the
+        // core.fsmonitor pin alone suppresses the split index.
+        let index = fs::read(gitdir_of(&out.worktree).join("index")).unwrap();
+        assert_ne!(&index[4..8], &[0, 0, 0, 4], "{variant}: index version 4");
         assert!(!marker.exists(), "{variant}: fsmonitor ran");
         assert_eq!(state(&ctx.fx, &ctx.clone, &[]), before, "{variant}");
         assert_exact(&ctx.fx, &out.worktree, &ctx.head);
@@ -1512,4 +1541,70 @@ fn sparse_reviewer_clone_does_not_thin_the_worktree() {
     fs::remove_dir_all(first.worktree.join("drop")).unwrap();
     let second = ctx.ok();
     assert_exact(&ctx.fx, &second.worktree, &ctx.head);
+}
+
+#[test]
+fn a_file_or_symlink_at_the_worktree_path_is_replaced() {
+    let ctx = Ctx::new();
+    let first = ctx.ok();
+    ctx.stop(&first);
+    let wt = ctx.wt();
+    fs::remove_dir_all(&wt).unwrap();
+    fs::write(&wt, "not a directory\n").unwrap();
+    let second = ctx.ok();
+    assert_exact(&ctx.fx, &second.worktree, &ctx.head);
+    ctx.stop(&second);
+    fs::remove_dir_all(&wt).unwrap();
+    std::os::unix::fs::symlink(ctx.home.join("nowhere"), &wt).unwrap();
+    let third = ctx.ok();
+    assert!(!fs::symlink_metadata(&wt).unwrap().file_type().is_symlink());
+    assert_exact(&ctx.fx, &third.worktree, &ctx.head);
+}
+
+#[test]
+fn reset_worktree_rejects_a_bad_head_before_running_git() {
+    let ctx = Ctx::new();
+    let out = ctx.ok();
+    let err = ctx
+        .fx
+        .git(&ctx.clone)
+        .reset_worktree(&out.worktree, "abc")
+        .unwrap_err();
+    assert_eq!(err.code(), "invalid_ref");
+    assert_exact(&ctx.fx, &out.worktree, &ctx.head);
+}
+
+#[test]
+fn pr_repo_with_base_on_remotes_naming_different_repos_fails() {
+    let fx = FixtureRepo::new();
+    let dir = fx.path().join("two-base");
+    fx.run(fx.path(), ["init", "two-base"]);
+    fx.run(
+        &dir,
+        [
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/me/widget.git",
+        ],
+    );
+    fx.run(
+        &dir,
+        [
+            "remote",
+            "add",
+            "other",
+            "https://github.com/octo/widget.git",
+        ],
+    );
+    for r in ["origin", "other"] {
+        fx.run(&dir, ["config", &format!("remote.{r}.gh-resolved"), "base"]);
+    }
+    let err = pr_repo(&fx.git(&dir)).unwrap_err();
+    assert_eq!(err.code(), "not_in_clone");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("me/widget") && msg.contains("octo/widget"),
+        "{msg}"
+    );
 }
