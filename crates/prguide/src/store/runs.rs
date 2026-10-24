@@ -203,6 +203,10 @@ pub fn active_run(tx: &Transaction<'_>, now: Timestamp) -> Result<Option<Run>, S
 }
 
 /// The gate for every call that carries a run id.
+///
+/// On `RunGate::Stopped` the caller must let its transaction commit and map to
+/// `run_stopped` after `Store::tx` returns: returning `Err` from the closure rolls
+/// back an expiry this call just made and leaves the run's claims held.
 pub fn gate(tx: &Transaction<'_>, now: Timestamp, run_id: &RunId) -> Result<RunGate, StoreError> {
     let Some(run) = fetch(tx, run_id.as_str())? else {
         return Err(StoreError::RunUnknown {

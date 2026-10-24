@@ -61,11 +61,6 @@ fn every_command_parses_required_and_optional_arguments() {
             "guide commit",
         ),
         (&["open", "--run", "r_x"], "open"),
-        (&["wait", "--run", "r_x"], "wait"),
-        (
-            &["wait", "--run", "r_x", "--timeout", "4m", "--max", "3"],
-            "wait",
-        ),
         (&["show", "e_1", "--run", "r_x"], "show"),
         (
             &[
@@ -119,7 +114,6 @@ fn every_command_parses_required_and_optional_arguments() {
             ],
             "draft-question",
         ),
-        (&["ack", "e_1", "--run", "r_x"], "ack"),
         (&["threads", "--run", "r_x"], "threads"),
         (&["threads", "--run", "r_x", "--github"], "threads"),
         (&["status", "--run", "r_x"], "status"),

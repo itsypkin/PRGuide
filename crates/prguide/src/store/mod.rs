@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{Connection, ErrorCode, TransactionBehavior};
+use rusqlite::{Connection, ErrorCode, OpenFlags, TransactionBehavior};
 
 pub mod deepdives;
 pub mod events;
@@ -191,8 +191,11 @@ impl FakeClock {
     }
 
     pub fn advance(&self, d: Duration) {
-        let next = Timestamp(self.millis.load(Ordering::SeqCst)).saturating_add(d);
-        self.millis.store(next.0, Ordering::SeqCst);
+        let _ = self
+            .millis
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |millis| {
+                Some(Timestamp(millis).saturating_add(d).0)
+            });
     }
 }
 
@@ -239,6 +242,63 @@ impl Store {
             pr: pr.clone(),
             conn,
             clock: Arc::new(SystemClock),
+        })
+    }
+
+    /// Opens the store of the PR that run `run_id` belongs to.
+    ///
+    /// Agent commands get only `--run <id>`, so this is how they find their
+    /// store. It looks at every PR store under `home` in sorted order, reads
+    /// each one without changing it, and opens the first that has the run.
+    /// No store has it (or there are no stores): `run_unknown`. Call it before
+    /// any write transaction.
+    pub fn open_for_run(home: &Path, run_id: &runs::RunId) -> Result<Self, StoreError> {
+        let root = home.join("prs").join(GITHUB_HOST);
+        let owners = match sorted_dirs(&root, true)? {
+            Some(entries) => entries,
+            None => {
+                return Err(StoreError::RunUnknown {
+                    run_id: run_id.to_string(),
+                });
+            }
+        };
+        for owner in owners {
+            let Some(repos) = sorted_dirs(&owner, false)? else {
+                continue;
+            };
+            for repo in repos {
+                let Some(numbers) = sorted_dirs(&repo, false)? else {
+                    continue;
+                };
+                for number in numbers {
+                    let (Some(owner_name), Some(repo_name), Some(number_name)) = (
+                        owner.file_name().and_then(|name| name.to_str()),
+                        repo.file_name().and_then(|name| name.to_str()),
+                        number.file_name().and_then(|name| name.to_str()),
+                    ) else {
+                        continue;
+                    };
+                    if owner_name != owner_name.to_ascii_lowercase()
+                        || repo_name != repo_name.to_ascii_lowercase()
+                    {
+                        continue;
+                    }
+                    let Ok(number_value) = number_name.parse::<u64>() else {
+                        continue;
+                    };
+                    let Ok(pr) = PrRef::new(owner_name, repo_name, number_value) else {
+                        continue;
+                    };
+                    let db = number.join("store.db");
+                    if !db.is_file() || !store_has_run(&db, run_id) {
+                        continue;
+                    }
+                    return Self::open_in(home, &pr);
+                }
+            }
+        }
+        Err(StoreError::RunUnknown {
+            run_id: run_id.to_string(),
         })
     }
 
@@ -289,6 +349,43 @@ impl Store {
             .pragma_query_value(None, "data_version", |row| row.get(0))
             .map_err(StoreError::from)
     }
+}
+
+fn sorted_dirs(path: &Path, required: bool) -> Result<Option<Vec<PathBuf>>, StoreError> {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) if required => {
+            return Err(StoreError::Io {
+                path: path.to_owned(),
+                source,
+            });
+        }
+        Err(_) => return Ok(None),
+    };
+    let mut dirs = Vec::new();
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            dirs.push(entry.path());
+        }
+    }
+    dirs.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    Ok(Some(dirs))
+}
+
+fn store_has_run(db: &Path, run_id: &runs::RunId) -> bool {
+    let Ok(conn) = Connection::open_with_flags(
+        db,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return false;
+    };
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM runs WHERE id = ?1)",
+        [run_id.as_str()],
+        |row| row.get::<_, i64>(0),
+    )
+    .is_ok_and(|found| found != 0)
 }
 
 fn configure_wal(conn: &Connection) -> Result<(), StoreError> {
@@ -355,6 +452,12 @@ pub enum StoreError {
     RunStopped { run_id: String },
     #[error("no run {run_id} in this store")]
     RunUnknown { run_id: String },
+    #[error("no event {event_id} in this store")]
+    EventUnknown { event_id: String },
+    #[error("event {event_id} is not claimed by run {run_id}")]
+    EventNotClaimed { event_id: String, run_id: String },
+    #[error("another prguide wait is already listening on this PR (it holds {path})", path = .path.display())]
+    WaitActive { path: PathBuf },
 }
 
 impl StoreError {
@@ -368,6 +471,9 @@ impl StoreError {
             Self::RunActive { .. } => "run_active",
             Self::RunStopped { .. } => "run_stopped",
             Self::RunUnknown { .. } => "run_unknown",
+            Self::EventUnknown { .. } => "event_unknown",
+            Self::EventNotClaimed { .. } => "event_not_claimed",
+            Self::WaitActive { .. } => "wait_active",
         }
     }
 }
@@ -523,5 +629,23 @@ mod tests {
             super::StoreError::Sqlite(ref error)
                 if error.sqlite_error_code() == Some(ErrorCode::Unknown)
         ));
+    }
+
+    #[test]
+    fn fake_clock_advance_is_atomic() {
+        let clock = std::sync::Arc::new(FakeClock::new(Timestamp::from_unix_millis(T0)));
+        let mut threads = Vec::new();
+        for _ in 0..8 {
+            let clock = clock.clone();
+            threads.push(std::thread::spawn(move || {
+                for _ in 0..10_000 {
+                    clock.advance(Duration::from_millis(1));
+                }
+            }));
+        }
+        for thread in threads {
+            thread.join().expect("thread");
+        }
+        assert_eq!(clock.now().unix_millis(), T0 + 80_000);
     }
 }

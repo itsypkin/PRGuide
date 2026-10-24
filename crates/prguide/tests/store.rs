@@ -1169,3 +1169,28 @@ fn schema_v1_snapshot() {
     }
     insta::assert_snapshot!("schema_v1_snapshot", text);
 }
+
+#[test]
+fn expiry_after_lease_until_records_the_time_seen() {
+    let (_temp, mut store, clock) = setup();
+    let run = start_claimed(&mut store);
+    clock.set(at(T0 + 45 * MIN));
+    let error = runs::require_active(&mut store, &run).expect_err("expired");
+    assert_eq!(error.code(), "run_stopped");
+    let row = run_row(&mut store, &run);
+    assert_eq!(row.0, "expired");
+    assert_eq!(row.2, "2026-10-23T00:30:00.000Z");
+    assert_eq!(row.3.as_deref(), Some("2026-10-23T00:45:00.000Z"));
+}
+
+#[test]
+fn run_id_is_the_ulid_random_tail() {
+    let (_temp, mut store, _clock) = setup();
+    let mut prefixes = std::collections::HashSet::new();
+    for _ in 0..20 {
+        let run = runs::start_run(&mut store, false).expect("start");
+        prefixes.insert(run.id.as_str()[2..8].to_owned());
+        runs::stop_run(&mut store, &run.id, StopReason::Quit).expect("stop");
+    }
+    assert!(prefixes.len() > 1);
+}
