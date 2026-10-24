@@ -189,6 +189,7 @@ impl FakeClock {
     pub fn set(&self, t: Timestamp) {
         self.millis.store(t.0, Ordering::SeqCst);
     }
+
     pub fn advance(&self, d: Duration) {
         let _ = self
             .millis

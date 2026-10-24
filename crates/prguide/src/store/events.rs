@@ -272,6 +272,7 @@ fn with_wait_lock<T>(
         });
     }
 }
+
 fn check_wait(store: &Store, run_id: &RunId) -> Result<(bool, bool), StoreError> {
     store.conn.query_row(
         "SELECT (SELECT state FROM runs WHERE id = ?1), EXISTS (SELECT 1 FROM events WHERE state = 'pending' OR (state = 'claimed' AND claimed_by = ?1))",
