@@ -312,7 +312,7 @@ code:
     )
     .unwrap_err()
     .to_string();
-    assert_eq!(neg, "PROBE");
+    assert!(neg.contains("invalid value: integer `-1`, expected u32"));
     assert!(bad("id: a\n    kind: other\n    path: p\n    side: new").contains("unknown variant"));
 }
 
