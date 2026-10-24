@@ -1044,13 +1044,18 @@ fn hooks_never_run() {
     }
     gconfig(fx, "core.hooksPath", global.to_str().unwrap());
     let cfg = marker_script(&tools, "cfg", &marker, "");
-    for event in events {
+    let ref_cfg = tools.join("ref-cfg");
+    fs::write(&ref_cfg, &ref_body).unwrap();
+    fs::set_permissions(&ref_cfg, fs::Permissions::from_mode(0o755)).unwrap();
+    for event in ["post-checkout", "post-index-change"] {
         fx.run(
             fx.path(),
             ["config", "--global", "--add", "hook.h.event", event],
         );
     }
     gconfig(fx, "hook.h.command", cfg.to_str().unwrap());
+    gconfig(fx, "hook.r.event", "reference-transaction");
+    gconfig(fx, "hook.r.command", ref_cfg.to_str().unwrap());
     let first = ctx.ok();
     ctx.stop(&first);
     fs::write(first.worktree.join("junk.txt"), "j\n").unwrap();
