@@ -939,6 +939,14 @@ fn open_for_run_skips_junk_and_leaves_it_untouched() {
     let run = runs::start_run(&mut store, false).expect("run").id;
     drop(store);
     let root = temp.path().join("prs/github.com");
+    let uppercase = root.join("AAA/repo/1");
+    fs::create_dir_all(&uppercase).expect("uppercase");
+    fs::copy(
+        root.join("octo/repo/42/store.db"),
+        uppercase.join("store.db"),
+    )
+    .expect("copy store");
+
     fs::write(root.join("afile"), "file").expect("file");
     let junk = root.join("o/r");
     fs::create_dir_all(junk.join("abc")).expect("abc");
@@ -949,7 +957,16 @@ fn open_for_run_skips_junk_and_leaves_it_untouched() {
     fs::create_dir_all(junk.join("8")).expect("bad");
     fs::write(junk.join("8/store.db"), "not a database").expect("bad db");
     let found = Store::open_for_run(temp.path(), &run).expect("found");
+    assert_eq!(found.dir(), root.join("octo/repo/42"));
     drop(found);
+    if fs::canonicalize(root.join("AAA")).expect("uppercase")
+        != fs::canonicalize(root.join("aaa")).expect("lowercase")
+    {
+        assert!(
+            !root.join("aaa").exists(),
+            "mixed-case candidate was reopened"
+        );
+    }
     assert_eq!(
         fs::metadata(junk.join("6/store.db")).expect("empty").len(),
         0
