@@ -1,0 +1,22 @@
+---
+source: crates/prguide/tests/status.rs
+expression: text
+---
+[
+  {
+    "status": "listening"
+  },
+  {
+    "status": "working"
+  },
+  {
+    "status": "not_listening",
+    "pending": 1,
+    "active_run": "[RUN]"
+  },
+  {
+    "status": "not_listening",
+    "pending": 1,
+    "active_run": null
+  }
+]
