@@ -1,0 +1,176 @@
+---
+source: crates/prguide/tests/diff.rs
+expression: snapshot_files(&files)
+---
+path: "added"
+old_path: none
+status: Added
+modes: none -> 100644
+oids: Some("0000000000000000000000000000000000000000") -> Some("d5f7fc3f74f7dec08280f370a975b112e8f60818")
+similarity: None
+binary: false, mode_only: false, submodule: false
+hunk: -0,0 +1,1 section: none
+  Added: "added" no_newline: false
+
+path: "binary renamed"
+old_path: "binary-rename"
+status: Renamed
+modes: 100644 -> 100644
+oids: Some("254834fe07f60f09b2bde27fd7734821dc328560") -> Some("2787a2631f3878ce8ff4ee7a1688ef44872a94a0")
+similarity: Some(96)
+binary: true, mode_only: false, submodule: false
+
+path: "binary-added"
+old_path: none
+status: Added
+modes: none -> 100644
+oids: Some("0000000000000000000000000000000000000000") -> Some("486592b9e24e187753fca993a6d24b961c5e400c")
+similarity: None
+binary: true, mode_only: false, submodule: false
+
+path: "binary-deleted"
+old_path: none
+status: Deleted
+modes: 100644 -> none
+oids: Some("c2fc20decac06222c278423af870a87d04da6d61") -> Some("0000000000000000000000000000000000000000")
+similarity: None
+binary: true, mode_only: false, submodule: false
+
+path: "binary-modified"
+old_path: none
+status: Modified
+modes: 100644 -> 100644
+oids: Some("85371f28269e95b7ebc156df3ceb24b3285f3ead") -> Some("d2b944c56a472bbd91c2dfb8b5334cf24ac3064f")
+similarity: None
+binary: true, mode_only: false, submodule: false
+
+path: "binchmod"
+old_path: none
+status: Modified
+modes: 100644 -> 100755
+oids: Some("85371f28269e95b7ebc156df3ceb24b3285f3ead") -> Some("d2b944c56a472bbd91c2dfb8b5334cf24ac3064f")
+similarity: None
+binary: true, mode_only: false, submodule: false
+
+path: "chmod"
+old_path: none
+status: Modified
+modes: 100644 -> 100755
+oids: None -> None
+similarity: None
+binary: false, mode_only: true, submodule: false
+
+path: "deleted"
+old_path: none
+status: Deleted
+modes: 100644 -> none
+oids: Some("c8b1b42336f7e2c26898b5b99441d324f2de5412") -> Some("0000000000000000000000000000000000000000")
+similarity: None
+binary: false, mode_only: false, submodule: false
+hunk: -1,1 +0,0 section: none
+  Removed: "delete" no_newline: false
+
+path: "edit-chmod"
+old_path: none
+status: Modified
+modes: 100644 -> 100755
+oids: Some("90be1f3056c4f471f977a28497b8d4b392c55a02") -> Some("294186e497a23bf3fbfde12aacc7f720f668fe9a")
+similarity: None
+binary: false, mode_only: false, submodule: false
+hunk: -1,1 +1,1 section: none
+  Removed: "before" no_newline: false
+  Added: "after" no_newline: false
+
+path: "edited-renamed"
+old_path: "edited-rename"
+status: Renamed
+modes: 100644 -> 100644
+oids: Some("b2f931a67315c95c5daab3aac6de62e534808476") -> Some("b80f223d08e2bf5eded81bcf6783e702a30a5560")
+similarity: Some(75)
+binary: false, mode_only: false, submodule: false
+hunk: -1,5 +1,5 section: none
+  Context: "one" no_newline: false
+  Context: "two" no_newline: false
+  Removed: "three" no_newline: false
+  Added: "THREE" no_newline: false
+  Context: "four" no_newline: false
+  Context: "five" no_newline: false
+
+path: "empty-added"
+old_path: none
+status: Added
+modes: none -> 100644
+oids: Some("0000000000000000000000000000000000000000") -> Some("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391")
+similarity: None
+binary: false, mode_only: false, submodule: false
+
+path: "link-added"
+old_path: none
+status: Added
+modes: none -> 160000
+oids: Some("0000000000000000000000000000000000000000") -> Some("1111111111111111111111111111111111111111")
+similarity: None
+binary: false, mode_only: false, submodule: true
+
+path: "link-deleted"
+old_path: none
+status: Deleted
+modes: 160000 -> none
+oids: Some("2222222222222222222222222222222222222222") -> Some("0000000000000000000000000000000000000000")
+similarity: None
+binary: false, mode_only: false, submodule: true
+
+path: "link-updated"
+old_path: none
+status: Modified
+modes: 160000 -> 160000
+oids: Some("1111111111111111111111111111111111111111") -> Some("2222222222222222222222222222222222222222")
+similarity: None
+binary: false, mode_only: false, submodule: true
+
+path: "modified"
+old_path: none
+status: Modified
+modes: 100644 -> 100644
+oids: Some("90be1f3056c4f471f977a28497b8d4b392c55a02") -> Some("294186e497a23bf3fbfde12aacc7f720f668fe9a")
+similarity: None
+binary: false, mode_only: false, submodule: false
+hunk: -1,1 +1,1 section: none
+  Removed: "before" no_newline: false
+  Added: "after" no_newline: false
+
+path: "pure-renamed"
+old_path: "pure-rename"
+status: Renamed
+modes: none -> none
+oids: None -> None
+similarity: Some(100)
+binary: false, mode_only: false, submodule: false
+
+path: "rename-chmodmed"
+old_path: "rename-chmod"
+status: Renamed
+modes: 100644 -> 100755
+oids: None -> None
+similarity: Some(100)
+binary: false, mode_only: true, submodule: false
+
+path: "typechg"
+old_path: none
+status: Deleted
+modes: 100644 -> none
+oids: Some("f52515160081df27fbe0548e58ee74c8c73d91a7") -> Some("0000000000000000000000000000000000000000")
+similarity: None
+binary: false, mode_only: false, submodule: false
+hunk: -1,1 +0,0 section: none
+  Removed: "regular" no_newline: false
+
+path: "typechg"
+old_path: none
+status: Added
+modes: none -> 120000
+oids: Some("0000000000000000000000000000000000000000") -> Some("1de565933b05f74c75ff9a6520af5f9f8a5a2f1d")
+similarity: None
+binary: false, mode_only: false, submodule: false
+hunk: -0,0 +1,1 section: none
+  Added: "target" no_newline: true
