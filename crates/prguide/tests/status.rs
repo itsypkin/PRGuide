@@ -518,13 +518,13 @@ fn wait_still_wins_against_concurrent_probes() {
 fn a_lapsed_run_is_expired_by_the_status_read() {
     let (temp, mut store, clock) = setup();
     let a = start(&mut store);
-    append(&mut store, &clock, 2);
+    append(&mut store, &clock, 1);
     let claimed = claim(&temp, &clock, &a, 1);
     let e1 = claimed[0].clone();
     clock.advance(LEASE);
     assert_eq!(
         status::agent_status(&mut store).expect("status"),
-        not_listening(2, None)
+        not_listening(1, None)
     );
     let (state, _, ended_at, reason) = run_row(&mut store, a.as_str());
     assert_eq!(state, "expired");
@@ -749,6 +749,8 @@ fn cli_status_on_a_lapsed_lease_is_run_stopped_and_commits_the_expiry() {
         &["wait", "--run", run.as_str(), "--timeout", "0s"],
     ));
     assert!(out.status.success());
+    let claimed: serde_json::Value = serde_json::from_slice(&out.stdout).expect("wait json");
+    assert_eq!(claimed["events"].as_array().expect("events").len(), 1);
     exec(
         &mut store,
         &format!("UPDATE runs SET lease_until='2000-01-01T00:00:00.000Z' WHERE id='{run}'"),
