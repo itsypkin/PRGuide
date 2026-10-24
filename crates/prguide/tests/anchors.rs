@@ -985,7 +985,13 @@ fn map_insertion_above_shifts() {
             }),
         )
     };
-    assert_mapped(&m.after(insert), "f.txt", 12, 14);
+    let to = m.commit(insert);
+    m.fx.branch("moved");
+    for target in [to.as_str(), "moved"] {
+        let mapping = m.map(&m.anchor(), target);
+        assert_mapped(&mapping, "f.txt", 12, 14);
+        assert_eq!(mapping.range().map(|r| r.rev.as_str()), Some(to.as_str()));
+    }
     let delete = |fx: &FixtureRepo| fx.write("f.txt", nums("line", 30).replace("line 5\n", ""));
     assert_mapped(&m.after(delete), "f.txt", 9, 11);
     let both = |fx: &FixtureRepo| {
