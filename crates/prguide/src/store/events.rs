@@ -245,42 +245,31 @@ fn batch(
     }
     Ok(events)
 }
-fn probe_wait_lock(lock: &mut RwLock<std::fs::File>) -> std::io::Result<()> {
-    let guard = lock.try_write()?;
-    drop(guard);
-    Ok(())
-}
 
-fn acquire_wait_lock<'a>(
-    lock: &'a mut RwLock<std::fs::File>,
+fn with_wait_lock<T>(
+    lock: &mut RwLock<std::fs::File>,
     path: &std::path::Path,
     start: Instant,
-) -> Result<fd_lock::RwLockWriteGuard<'a, std::fs::File>, StoreError> {
+    f: impl FnOnce() -> Result<T, StoreError>,
+) -> Result<T, StoreError> {
     loop {
-        match probe_wait_lock(lock) {
-            Ok(()) => {
-                return lock.try_write().map_err(|source| StoreError::Io {
-                    path: path.to_owned(),
-                    source,
-                });
-            }
-            Err(error)
-                if error.kind() == ErrorKind::WouldBlock && start.elapsed() < LOCK_PATIENCE =>
-            {
-                std::thread::sleep(LOCK_RETRY);
-            }
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                return Err(StoreError::WaitActive {
-                    path: path.to_owned(),
-                });
-            }
-            Err(source) => {
-                return Err(StoreError::Io {
-                    path: path.to_owned(),
-                    source,
-                });
-            }
+        let error = match lock.try_write() {
+            Ok(_guard) => return f(),
+            Err(error) => error,
+        };
+        if error.kind() == ErrorKind::WouldBlock && start.elapsed() < LOCK_PATIENCE {
+            std::thread::sleep(LOCK_RETRY);
+            continue;
         }
+        if error.kind() == ErrorKind::WouldBlock {
+            return Err(StoreError::WaitActive {
+                path: path.to_owned(),
+            });
+        }
+        return Err(StoreError::Io {
+            path: path.to_owned(),
+            source: error,
+        });
     }
 }
 fn check_wait(store: &Store, run_id: &RunId) -> Result<(bool, bool), StoreError> {
@@ -322,33 +311,34 @@ pub fn wait(
             source,
         })?;
     let mut lock = RwLock::new(lock_file);
-    let _guard = acquire_wait_lock(&mut lock, &lock_path, Instant::now())?;
     let mut last_gate = start;
-    loop {
-        let now = clock.now();
-        let (active, claimable) = check_wait(store, run_id)?;
-        if !active {
-            return Ok(WaitOutcome::Stopped);
-        }
-        if claimable || now >= last_gate.saturating_add(RENEW_INTERVAL) {
-            let current = clock.now();
-            let outcome = store.tx(|tx| match runs::gate(tx, current, run_id)? {
-                RunGate::Stopped(_) => Ok::<_, StoreError>(GateBatch::Stopped),
-                RunGate::Active(_) => Ok(GateBatch::Events(batch(tx, run_id, current, max)?)),
-            })?;
-            match outcome {
-                GateBatch::Stopped => return Ok(WaitOutcome::Stopped),
-                GateBatch::Events(events) if !events.is_empty() => {
-                    return Ok(WaitOutcome::Events(events));
-                }
-                GateBatch::Events(_) => last_gate = now,
+    with_wait_lock(&mut lock, &lock_path, Instant::now(), || {
+        loop {
+            let now = clock.now();
+            let (active, claimable) = check_wait(store, run_id)?;
+            if !active {
+                return Ok(WaitOutcome::Stopped);
             }
+            if claimable || now >= last_gate.saturating_add(RENEW_INTERVAL) {
+                let current = clock.now();
+                let outcome = store.tx(|tx| match runs::gate(tx, current, run_id)? {
+                    RunGate::Stopped(_) => Ok::<_, StoreError>(GateBatch::Stopped),
+                    RunGate::Active(_) => Ok(GateBatch::Events(batch(tx, run_id, current, max)?)),
+                })?;
+                match outcome {
+                    GateBatch::Stopped => return Ok(WaitOutcome::Stopped),
+                    GateBatch::Events(events) if !events.is_empty() => {
+                        return Ok(WaitOutcome::Events(events));
+                    }
+                    GateBatch::Events(_) => last_gate = now,
+                }
+            }
+            if deadline.is_some_and(|deadline| now >= deadline) {
+                return Ok(WaitOutcome::Events(vec![]));
+            }
+            std::thread::sleep(POLL_INTERVAL);
         }
-        if deadline.is_some_and(|deadline| now >= deadline) {
-            return Ok(WaitOutcome::Events(vec![]));
-        }
-        std::thread::sleep(POLL_INTERVAL);
-    }
+    })
 }
 
 enum ResultOutcome {
