@@ -232,6 +232,8 @@ impl Git {
     }
 
     /// In an existing worktree: checkout --detach --force <head>, then clean -ffdx.
+    /// Trusts `<path>/.git`: callers must go through `prepare_worktree`, which
+    /// checks the worktree first.
     pub fn reset_worktree(&self, path: &Path, head: &str) -> Result<(), GitError> {
         valid_head(head)?;
         let git = self.with_dir(path);

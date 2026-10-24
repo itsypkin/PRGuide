@@ -1734,6 +1734,31 @@ fn worktree_git_symlink_to_the_clone_git_dir_is_rebuilt() {
 }
 
 #[test]
+fn worktree_config_core_worktree_elsewhere_is_rebuilt() {
+    planted_worktree(|ctx, wt, _| {
+        ctx.fx
+            .run(&ctx.clone, ["config", "extensions.worktreeConfig", "true"]);
+        ctx.fx.run(
+            wt,
+            [
+                "config",
+                "--worktree",
+                "core.worktree",
+                ctx.clone.to_str().unwrap(),
+            ],
+        );
+    });
+}
+
+#[test]
+fn worktree_git_symlink_to_a_reviewer_gitfile_is_rebuilt() {
+    planted_worktree(|_, wt, linked| {
+        fs::remove_file(wt.join(".git")).unwrap();
+        std::os::unix::fs::symlink(linked.join(".git"), wt.join(".git")).unwrap();
+    });
+}
+
+#[test]
 fn pr_file_named_false_never_runs() {
     // git 2.30 reads core.fsmonitor as a hook path, so the value `false` would run
     // a program named `false` found on PATH (with `.` on PATH: the PR's own file).
