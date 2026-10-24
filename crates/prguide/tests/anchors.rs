@@ -307,6 +307,13 @@ code:
     );
     assert!(bad("id: a\n    kind: diff\n    path: p\n    side: left").contains("unknown variant"));
     assert!(bad("id: a\n    kind: context\n    path: p\n    start: 1").contains("missing field"));
+    assert!(
+        serde_saphyr::from_str::<Doc>(
+            "code:\n  - id: a\n    kind: diff\n    path: p\n    side: new\n    start: -1"
+        )
+        .is_err()
+    );
+    assert!(bad("id: a\n    kind: other\n    path: p\n    side: new").contains("other"));
 }
 
 #[test]
@@ -622,6 +629,66 @@ fn resolve_context_at_each_revision() {
         assert!(got.hunks.is_empty());
         assert!(got.side.is_none() && got.file.is_none());
     }
+}
+
+#[test]
+fn resolve_range_guide_revisions() {
+    let r = R::new();
+    // New side of a diff block is numbered at selection.head (p1), not snapshot.head (p2).
+    let got = r.resolve(&r.range(), &dnew("src/a.rs", 20, 20)).unwrap();
+    assert_eq!(got.rev, r.p1);
+    // selection-base is selection.base (p1 here), not snapshot.base.
+    let cx = context(
+        &r.fx,
+        &r.b,
+        &r.p2,
+        &[&r.p1, &r.p2],
+        Selection::Commits {
+            first: r.p2.clone(),
+            last: r.p2.clone(),
+        },
+    );
+    assert_eq!(cx.selection.base, r.p1);
+    let got = r
+        .resolve(&cx, &cblock("v.txt", At::SelectionBase, 1, 1))
+        .unwrap();
+    assert_eq!(text_of(&got.lines), vec![b"p1".as_slice()]);
+    assert_eq!(got.rev, r.p1);
+}
+
+#[test]
+fn resolve_invalid_utf8_line_is_lossy_in_anchor() {
+    let fx = FixtureRepo::new();
+    fx.write("readme.txt", "hi\n");
+    let base = fx.commit("base");
+    fx.write("bad.txt", b"ok\n\xff\xfe bad\nend\n".to_vec());
+    let head = fx.commit("head");
+    let git = fx.git(fx.work_path());
+    let cx = context(&fx, &base, &head, &[&head], Selection::Full);
+    let got = resolve(&git, &cblock("bad.txt", At::SnapshotHead, 1, 3), &cx).unwrap();
+    assert_eq!(got.lines[1], b"\xff\xfe bad".to_vec());
+    let anchor = got.anchor("s", 2, 2).unwrap();
+    assert_eq!(anchor.lines, vec!["\u{FFFD}\u{FFFD} bad".to_string()]);
+}
+
+#[cfg(unix)]
+#[test]
+fn resolve_typechange_both_sides() {
+    let fx = FixtureRepo::new();
+    fx.write("t.txt", nums("t", 3));
+    let base = fx.commit("base");
+    fx.remove("t.txt");
+    std::os::unix::fs::symlink("p.rs", fx.work_path().join("t.txt")).unwrap();
+    let head = fx.commit("head");
+    let git = fx.git(fx.work_path());
+    let cx = context(&fx, &base, &head, &[&head], Selection::Full);
+    let new = resolve(&git, &dnew("t.txt", 1, 1), &cx).unwrap();
+    assert_eq!(new.rev, head);
+    assert_eq!(new.hunks.len(), 1);
+    assert_eq!(new.file.unwrap().status, FileStatus::Added);
+    let old = resolve(&git, &dold("t.txt", 1, 3), &cx).unwrap();
+    assert_eq!(old.rev, base);
+    assert_eq!(old.file.unwrap().status, FileStatus::Deleted);
 }
 
 #[test]
@@ -992,6 +1059,13 @@ fn map_insertion_above_shifts() {
         assert_mapped(&mapping, "f.txt", 12, 14);
         assert_eq!(mapping.range().map(|r| r.rev.as_str()), Some(to.as_str()));
     }
+    let after6 = |fx: &FixtureRepo| {
+        fx.write(
+            "f.txt",
+            edited("line", 30, |i| (i == 6).then(|| "line 6\nnew".to_string())),
+        )
+    };
+    assert_mapped(&m.after(after6), "f.txt", 11, 13);
     let delete = |fx: &FixtureRepo| fx.write("f.txt", nums("line", 30).replace("line 5\n", ""));
     assert_mapped(&m.after(delete), "f.txt", 9, 11);
     let both = |fx: &FixtureRepo| {
@@ -1054,6 +1128,7 @@ fn map_deleted_lines_is_changed() {
         }
     };
     assert_eq!(m.after(without(&["line 11"])), Mapping::Changed);
+    assert_eq!(m.after(without(&["line 10"])), Mapping::Changed);
     assert_eq!(
         m.after(without(&["line 10", "line 11", "line 12"])),
         Mapping::Changed
