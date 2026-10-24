@@ -193,7 +193,7 @@ impl FakeClock {
     pub fn advance(&self, d: Duration) {
         let _ = self
             .millis
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |millis| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |millis| {
                 Some(Timestamp(millis).saturating_add(d).0)
             });
     }
