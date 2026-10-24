@@ -581,31 +581,32 @@ fn wait_renews_the_lease_at_most_every_60s() {
     let x = RunId::new("r_x");
     insert_stopped_run(&mut store, &x);
     insert_event(&mut store, "other", "claimed", Some(&x), Some("old"));
+    clock.set(Timestamp::from_unix_millis(T0 + 10_000));
     let received = spawn_wait(&temp, clock.clone(), run.clone(), None, 10);
     wait_for_lock(&store.dir().join(events::WAIT_LOCK));
-    assert_eq!(run_row(&mut store, &run).1, "2026-10-23T00:30:00.000Z");
-    for offset in [10_000, 20_000, 59_999] {
+    assert_eq!(run_row(&mut store, &run).1, "2026-10-23T00:30:10.000Z");
+    for offset in [20_000, 69_999] {
         clock.set(Timestamp::from_unix_millis(T0 + offset));
         std::thread::sleep(Duration::from_millis(600));
-        assert_eq!(run_row(&mut store, &run).1, "2026-10-23T00:30:00.000Z");
+        assert_eq!(run_row(&mut store, &run).1, "2026-10-23T00:30:10.000Z");
     }
-    clock.set(Timestamp::from_unix_millis(T0 + 60_000));
+    clock.set(Timestamp::from_unix_millis(T0 + 70_000));
     let deadline = Instant::now() + Duration::from_secs(2);
-    while run_row(&mut store, &run).1 == "2026-10-23T00:30:00.000Z" {
+    while run_row(&mut store, &run).1 == "2026-10-23T00:30:10.000Z" {
         assert!(Instant::now() < deadline, "lease not renewed");
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(run_row(&mut store, &run).1, "2026-10-23T00:31:00.000Z");
-    clock.set(Timestamp::from_unix_millis(T0 + 119_999));
+    assert_eq!(run_row(&mut store, &run).1, "2026-10-23T00:31:10.000Z");
+    clock.set(Timestamp::from_unix_millis(T0 + 129_999));
     std::thread::sleep(Duration::from_millis(600));
-    assert_eq!(run_row(&mut store, &run).1, "2026-10-23T00:31:00.000Z");
-    clock.set(Timestamp::from_unix_millis(T0 + 120_000));
+    assert_eq!(run_row(&mut store, &run).1, "2026-10-23T00:31:10.000Z");
+    clock.set(Timestamp::from_unix_millis(T0 + 130_000));
     let deadline = Instant::now() + Duration::from_secs(2);
-    while run_row(&mut store, &run).1 == "2026-10-23T00:31:00.000Z" {
+    while run_row(&mut store, &run).1 == "2026-10-23T00:31:10.000Z" {
         assert!(Instant::now() < deadline, "lease not renewed twice");
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(run_row(&mut store, &run).1, "2026-10-23T00:32:00.000Z");
+    assert_eq!(run_row(&mut store, &run).1, "2026-10-23T00:32:10.000Z");
     runs::stop_run(&mut store, &run, StopReason::End).expect("stop");
     assert_eq!(
         received
