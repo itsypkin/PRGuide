@@ -245,18 +245,25 @@ fn batch(
     }
     Ok(events)
 }
+fn probe_wait_lock(lock: &mut RwLock<std::fs::File>) -> std::io::Result<()> {
+    let guard = lock.try_write()?;
+    drop(guard);
+    Ok(())
+}
+
 fn acquire_wait_lock<'a>(
     lock: &'a mut RwLock<std::fs::File>,
     path: &std::path::Path,
     start: Instant,
 ) -> Result<fd_lock::RwLockWriteGuard<'a, std::fs::File>, StoreError> {
-    let lock_ptr: *mut RwLock<std::fs::File> = lock;
     loop {
-        // SAFETY: each failed attempt returns without retaining a borrow; the
-        // successful guard is returned immediately and is the only mutable user.
-        let attempt = unsafe { (&mut *lock_ptr).try_write() };
-        match attempt {
-            Ok(guard) => return Ok(guard),
+        match probe_wait_lock(lock) {
+            Ok(()) => {
+                return lock.try_write().map_err(|source| StoreError::Io {
+                    path: path.to_owned(),
+                    source,
+                });
+            }
             Err(error)
                 if error.kind() == ErrorKind::WouldBlock && start.elapsed() < LOCK_PATIENCE =>
             {
@@ -276,7 +283,6 @@ fn acquire_wait_lock<'a>(
         }
     }
 }
-
 fn check_wait(store: &Store, run_id: &RunId) -> Result<(bool, bool), StoreError> {
     store.conn.query_row(
         "SELECT (SELECT state FROM runs WHERE id = ?1), EXISTS (SELECT 1 FROM events WHERE state = 'pending' OR (state = 'claimed' AND claimed_by = ?1))",

@@ -1,57 +1,222 @@
 //! Event, wait, result, lookup, and CLI integration coverage for T1-3.
 
-use std::{num::NonZeroU32, sync::Arc, time::Duration};
+use std::{
+    fs::{self, OpenOptions},
+    num::NonZeroU32,
+    process::{Child, Command, Stdio},
+    sync::{Arc, mpsc},
+    time::{Duration, Instant},
+};
 
 use prguide::store::{
     FakeClock, PrRef, Store, StoreError, Timestamp,
     events::{self, EventType, ResultKind, WaitOutcome},
-    runs::{self, RunId},
+    runs::{self, RunId, StopReason},
 };
-use tempfile::tempdir;
+use rusqlite::{Connection, params};
+use serde_json::Value;
+use tempfile::{TempDir, tempdir};
 
 const T0: i64 = 1_792_713_600_000;
+const PR: (&str, &str, u64) = ("octo", "repo", 42);
 
-fn setup() -> (tempfile::TempDir, Store, Arc<FakeClock>) {
+fn nz(value: u32) -> NonZeroU32 {
+    NonZeroU32::new(value).expect("non-zero")
+}
+
+fn setup() -> (TempDir, Store, Arc<FakeClock>) {
     let temp = tempdir().expect("tempdir");
     let clock = Arc::new(FakeClock::new(Timestamp::from_unix_millis(T0)));
-    let pr = PrRef::new("octo", "repo", 42).expect("PR");
-    let store = Store::open_in(temp.path(), &pr)
+    let store = Store::open_in(temp.path(), &pr())
         .expect("store")
         .with_clock(clock.clone());
     (temp, store, clock)
 }
 
-fn pending(store: &mut Store, id: &str) {
+fn pr() -> PrRef {
+    PrRef::new(PR.0, PR.1, PR.2).expect("valid PR")
+}
+
+fn system_store(home: &TempDir) -> Store {
+    Store::open_in(home.path(), &pr()).expect("system store")
+}
+
+fn open_with_clock(home: &TempDir, clock: Arc<FakeClock>) -> Store {
+    Store::open_in(home.path(), &pr())
+        .expect("store")
+        .with_clock(clock)
+}
+
+fn insert_pending(store: &mut Store, id: &str) {
+    store
+        .tx(|tx| {
+            tx.execute(
+                "INSERT INTO events(id,type,state,created_at) VALUES(?1,'generate_request','pending','t')",
+                [id],
+            )?;
+            Ok::<_, StoreError>(())
+        })
+        .expect("event");
+}
+
+fn insert_event(
+    store: &mut Store,
+    id: &str,
+    state: &str,
+    claimed_by: Option<&RunId>,
+    claimed_at: Option<&str>,
+) {
+    store
+        .tx(|tx| {
+            tx.execute(
+                "INSERT INTO events(id,type,state,claimed_by,claimed_at,created_at) VALUES(?1,'generate_request',?2,?3,?4,'t')",
+                params![id, state, claimed_by.map(RunId::as_str), claimed_at],
+            )?;
+            Ok::<_, StoreError>(())
+        })
+        .expect("event");
+}
+
+type EventRow = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+fn event_row(store: &mut Store, id: &str) -> EventRow {
+    store
+        .tx(|tx| {
+            tx.query_row(
+        "SELECT state,claimed_by,claimed_at,result_kind,result_id,done_at FROM events WHERE id=?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+    ).map_err(StoreError::from)
+        })
+        .expect("event row")
+}
+
+fn run_row(store: &mut Store, run: &RunId) -> (String, String, Option<String>) {
+    store
+        .tx(|tx| {
+            tx.query_row(
+                "SELECT state,lease_until,ended_at FROM runs WHERE id=?1",
+                [run.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .map_err(StoreError::from)
+        })
+        .expect("run row")
+}
+
+fn assert_error<T>(result: Result<T, StoreError>, code: &str, text: &str) {
+    let error = match result {
+        Ok(_) => panic!("expected error"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), code);
+    assert!(error.to_string().contains(text), "{}", error);
+}
+
+fn wait_for_lock(path: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(file) = OpenOptions::new().read(true).write(true).open(path) {
+            let mut lock = fd_lock::RwLock::new(file);
+            if lock.try_write().is_err() {
+                return;
+            }
+        }
+        assert!(Instant::now() < deadline, "listener never acquired lock");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn spawn_wait(
+    home: &TempDir,
+    clock: Arc<FakeClock>,
+    run: RunId,
+    timeout: Option<Duration>,
+) -> mpsc::Receiver<Result<WaitOutcome, StoreError>> {
+    let home = home.path().to_owned();
+    let (sent, received) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut store = Store::open_in(&home, &pr())
+            .expect("thread store")
+            .with_clock(clock);
+        sent.send(events::wait(&mut store, &run, timeout, nz(10)))
+            .expect("send");
+    });
+    received
+}
+
+fn append_generate(store: &mut Store) -> String {
+    let now = store.now();
+    store
+        .tx(|tx| events::append_generate_request(tx, now, None, None))
+        .expect("append")
+        .id
+}
+
+fn seed_thread_and_message(store: &mut Store) {
     store.tx(|tx| {
-        tx.execute(
-            "INSERT INTO events(id,type,state,created_at) VALUES(?1,'generate_request','pending','t')",
-            [id],
-        )?;
+        tx.execute("INSERT INTO guide_versions VALUES (1,'ready',NULL,'a','b','full','a','b','[]','[]','t','t')", [])?;
+        tx.execute("INSERT INTO threads VALUES ('t1','t',1,'slide',NULL)", [])?;
+        tx.execute("INSERT INTO messages VALUES ('m1','t1','reviewer','body','t')", [])?;
         Ok::<_, StoreError>(())
-    }).expect("event");
+    }).expect("thread and message");
 }
 
 #[test]
 fn append_writes_pending_rows() {
     let (_temp, mut store, _clock) = setup();
+    seed_thread_and_message(&mut store);
     let now = store.now();
-    let event = store
-        .tx(|tx| events::append_generate_request(tx, now, None, None))
-        .expect("append");
-    assert_eq!(event.event_type, EventType::GenerateRequest);
-    assert_eq!(event.seq, 1);
-    assert_eq!(event.id.len(), 26);
-    let row: (String, Option<String>) = store
+    let events = store
         .tx(|tx| {
-            tx.query_row(
-                "SELECT state, claimed_by FROM events WHERE id = ?1",
-                [&event.id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(StoreError::from)
+            Ok::<_, StoreError>(vec![
+                events::append_comment(tx, now, "t1", "m1")?,
+                events::append_deepdive_request(tx, now, "t1")?,
+                events::append_generate_request(tx, now, None, None)?,
+                events::append_generate_request(tx, now, Some("aaa"), Some("bbb"))?,
+            ])
         })
-        .expect("row");
-    assert_eq!(row, ("pending".into(), None));
+        .expect("append");
+    assert_eq!(
+        events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+    assert_eq!(events[0].event_type, EventType::Comment);
+    assert_eq!(events[1].event_type, EventType::DeepdiveRequest);
+    assert_eq!(events[2].event_type, EventType::GenerateRequest);
+    assert_eq!(
+        events[3].range.as_ref().expect("range").first.as_deref(),
+        Some("aaa")
+    );
+    for event in &events {
+        assert_eq!(event.id.len(), 26);
+        assert!(
+            event
+                .id
+                .bytes()
+                .all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b))
+        );
+        assert_eq!(
+            event_row(&mut store, &event.id),
+            ("pending".into(), None, None, None, None, None)
+        );
+    }
+    assert_eq!(
+        store
+            .tx(|tx| tx
+                .query_row("SELECT created_at FROM events WHERE seq=1", [], |r| r
+                    .get::<_, String>(0))
+                .map_err(StoreError::from))
+            .expect("time"),
+        now.to_rfc3339()
+    );
 }
 
 #[test]
@@ -59,318 +224,1025 @@ fn append_comment_needs_its_thread_and_message() {
     let (_temp, mut store, _clock) = setup();
     let now = store.now();
     let error = store
-        .tx(|tx| events::append_comment(tx, now, "missing", "also-missing"))
+        .tx(|tx| events::append_comment(tx, now, "missing", "missing"))
         .expect_err("foreign key");
     assert_eq!(error.code(), "store_sqlite");
-    assert!(error.to_string().contains("database"));
+    assert!(error.to_string().contains("FOREIGN KEY"));
+    assert_eq!(
+        store
+            .tx(|tx| tx
+                .query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))
+                .map_err(StoreError::from))
+            .expect("count"),
+        0
+    );
 }
 
 #[test]
 fn wait_returns_claimed_then_pending_by_seq_up_to_max() {
     let (_temp, mut store, _clock) = setup();
     let run = runs::start_run(&mut store, false).expect("run").id;
-    pending(&mut store, "e1");
-    pending(&mut store, "e2");
-    pending(&mut store, "e3");
-    let WaitOutcome::Events(events) = events::wait(
-        &mut store,
-        &run,
-        Some(Duration::ZERO),
-        NonZeroU32::new(2).expect("nonzero"),
-    )
-    .expect("wait") else {
+    insert_event(&mut store, "ez", "pending", None, None);
+    insert_event(&mut store, "ey", "claimed", Some(&run), Some("old"));
+    for id in [
+        "ex", "ew", "ev", "eu", "et", "es", "er", "eq", "ep", "eo", "en", "em",
+    ] {
+        insert_pending(&mut store, id);
+    }
+    let WaitOutcome::Events(got) =
+        events::wait(&mut store, &run, Some(Duration::ZERO), nz(3)).expect("wait")
+    else {
+        panic!("events")
+    };
+    assert_eq!(got.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![2, 1, 3]);
+    assert_eq!(event_row(&mut store, "ey").2.as_deref(), Some("old"));
+    assert_eq!(event_row(&mut store, "ez").1.as_deref(), Some(run.as_str()));
+    assert_eq!(event_row(&mut store, "ex").1.as_deref(), Some(run.as_str()));
+    assert_eq!(event_row(&mut store, "ew").0, "pending");
+    let WaitOutcome::Events(again) =
+        events::wait(&mut store, &run, Some(Duration::ZERO), nz(10)).expect("second")
+    else {
         panic!("events")
     };
     assert_eq!(
-        events.iter().map(|event| event.seq).collect::<Vec<_>>(),
-        vec![1, 2]
+        again.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        (1..=10).collect::<Vec<_>>()
     );
 }
 
 #[test]
 fn wait_event_json_shapes() {
+    let (_temp, mut store, _clock) = setup();
+    seed_thread_and_message(&mut store);
+    let run = runs::start_run(&mut store, false).expect("run").id;
+    let now = store.now();
+    let inserted = store
+        .tx(|tx| {
+            Ok::<_, StoreError>(vec![
+                events::append_comment(tx, now, "t1", "m1")?,
+                events::append_deepdive_request(tx, now, "t1")?,
+                events::append_generate_request(tx, now, None, None)?,
+                events::append_generate_request(tx, now, Some("aaa"), Some("bbb"))?,
+            ])
+        })
+        .expect("append");
+    let outcome = events::wait(&mut store, &run, Some(Duration::ZERO), nz(10)).expect("wait");
+    let text = serde_json::to_string(&outcome).expect("json");
+    let value: Value = serde_json::from_str(&text).expect("json object");
+    assert_eq!(
+        value["events"]
+            .as_array()
+            .expect("events")
+            .iter()
+            .map(|event| event["id"].as_str().expect("id"))
+            .collect::<Vec<_>>(),
+        inserted
+            .iter()
+            .map(|event| event.id.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(text.contains("\"type\":\"comment\""));
+    assert!(text.contains("\"range\":{\"first\":\"aaa\",\"last\":\"bbb\"}"));
     assert_eq!(
         serde_json::to_string(&WaitOutcome::Stopped).expect("json"),
         "{\"stopped\":true}"
     );
+    assert_eq!(
+        serde_json::to_string(&WaitOutcome::Events(vec![])).expect("json"),
+        "{\"events\":[]}"
+    );
 }
+
 #[test]
 fn wait_times_out_on_the_store_clock() {
-    let (_t, mut s, _c) = setup();
-    let r = runs::start_run(&mut s, false).expect("run").id;
-    assert_eq!(
-        events::wait(&mut s, &r, Some(Duration::ZERO), NonZeroU32::MIN).expect("wait"),
-        WaitOutcome::Events(vec![])
-    );
-}
-#[test]
-fn wait_wakes_when_an_event_is_appended() {
-    append_writes_pending_rows();
-}
-#[test]
-fn stop_while_blocked_returns_stopped_within_1s() {
-    let (_t, mut s, _c) = setup();
-    let r = runs::start_run(&mut s, false).expect("run").id;
-    runs::stop_run(&mut s, &r, runs::StopReason::End).expect("stop");
-    assert_eq!(
-        events::wait(&mut s, &r, Some(Duration::ZERO), NonZeroU32::MIN).expect("wait"),
-        WaitOutcome::Stopped
-    );
-}
-#[test]
-fn second_wait_gets_wait_active() {
-    use std::{fs::OpenOptions, sync::mpsc, time::Instant};
-
     let (temp, mut store, clock) = setup();
     let run = runs::start_run(&mut store, false).expect("run").id;
-    let home = temp.path().to_owned();
-    let thread_clock = clock.clone();
-    let thread_run = run.clone();
-    let (sent, received) = mpsc::channel();
-    std::thread::spawn(move || {
-        let pr = PrRef::new("octo", "repo", 42).expect("PR");
-        let mut listener = Store::open_in(&home, &pr)
-            .expect("listener")
-            .with_clock(thread_clock);
-        let result = events::wait(&mut listener, &thread_run, None, NonZeroU32::MIN);
-        sent.send(result).expect("send");
-    });
-    let lock_path = store.dir().join(events::WAIT_LOCK);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let file = OpenOptions::new().read(true).write(true).open(&lock_path);
-        if let Ok(file) = file {
-            let mut lock = fd_lock::RwLock::new(file);
-            if lock.try_write().is_err() {
-                break;
-            }
-        }
-        assert!(Instant::now() < deadline, "listener never acquired lock");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let pr = PrRef::new("octo", "repo", 42).expect("PR");
-    let mut second = Store::open_in(temp.path(), &pr)
-        .expect("second")
-        .with_clock(clock);
-    let started = Instant::now();
-    let error = events::wait(&mut second, &run, Some(Duration::ZERO), NonZeroU32::MIN)
-        .expect_err("held lock");
-    assert_eq!(error.code(), "wait_active");
-    assert!(error.to_string().contains("wait.lock"));
-    assert!(started.elapsed() >= Duration::from_millis(450));
-    runs::stop_run(&mut store, &run, runs::StopReason::End).expect("stop");
+    let received = spawn_wait(
+        &temp,
+        clock.clone(),
+        run.clone(),
+        Some(Duration::from_secs(300)),
+    );
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(received.try_recv().is_err());
+    clock.advance(Duration::from_secs(300));
     assert_eq!(
         received
             .recv_timeout(Duration::from_secs(2))
-            .expect("listener result")
+            .expect("return")
+            .expect("wait"),
+        WaitOutcome::Events(vec![])
+    );
+    assert_eq!(
+        events::wait(&mut store, &run, Some(Duration::ZERO), nz(10)).expect("zero"),
+        WaitOutcome::Events(vec![])
+    );
+}
+
+#[test]
+fn wait_wakes_when_an_event_is_appended() {
+    let (temp, mut store, clock) = setup();
+    let run = runs::start_run(&mut store, false).expect("run").id;
+    let received = spawn_wait(&temp, clock.clone(), run.clone(), None);
+    wait_for_lock(&store.dir().join(events::WAIT_LOCK));
+    let mut writer = open_with_clock(&temp, clock);
+    let id = append_generate(&mut writer);
+    let WaitOutcome::Events(got) = received
+        .recv_timeout(Duration::from_secs(2))
+        .expect("wake")
+        .expect("wait")
+    else {
+        panic!("events")
+    };
+    assert_eq!(
+        got.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+        vec![id.as_str()]
+    );
+    assert_eq!(event_row(&mut store, &id).1.as_deref(), Some(run.as_str()));
+}
+
+#[test]
+fn stop_while_blocked_returns_stopped_within_1s() {
+    let (temp, mut store, clock) = setup();
+    let run = runs::start_run(&mut store, false).expect("run").id;
+    let received = spawn_wait(&temp, clock, run.clone(), None);
+    wait_for_lock(&store.dir().join(events::WAIT_LOCK));
+    let start = Instant::now();
+    runs::stop_run(&mut store, &run, StopReason::End).expect("stop");
+    assert_eq!(
+        received
+            .recv_timeout(Duration::from_secs(2))
+            .expect("return")
+            .expect("wait"),
+        WaitOutcome::Stopped
+    );
+    assert!(start.elapsed() < Duration::from_secs(1));
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(store.dir().join(events::WAIT_LOCK))
+        .expect("lock file");
+    assert!(fd_lock::RwLock::new(file).try_write().is_ok());
+}
+
+#[test]
+fn second_wait_gets_wait_active() {
+    let (temp, mut store, clock) = setup();
+    let run = runs::start_run(&mut store, false).expect("run").id;
+    let received = spawn_wait(&temp, clock.clone(), run.clone(), None);
+    wait_for_lock(&store.dir().join(events::WAIT_LOCK));
+    let mut second = open_with_clock(&temp, clock);
+    let start = Instant::now();
+    assert_error(
+        events::wait(&mut second, &run, Some(Duration::ZERO), nz(10)),
+        "wait_active",
+        "wait.lock",
+    );
+    assert!(start.elapsed() >= Duration::from_millis(450));
+    runs::stop_run(&mut store, &run, StopReason::End).expect("stop");
+    assert_eq!(
+        received
+            .recv_timeout(Duration::from_secs(2))
+            .expect("return")
             .expect("wait"),
         WaitOutcome::Stopped
     );
 }
+
 #[test]
 fn wait_retries_a_briefly_held_lock() {
-    assert_eq!(events::LOCK_RETRY, Duration::from_millis(50));
+    let (temp, mut store, clock) = setup();
+    let run = runs::start_run(&mut store, false).expect("run").id;
+    let path = store.dir().join(events::WAIT_LOCK);
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .expect("lock");
+    let mut held = fd_lock::RwLock::new(file);
+    let guard = held.write().expect("hold lock");
+    let received = spawn_wait(&temp, clock, run, Some(Duration::ZERO));
+    std::thread::sleep(Duration::from_millis(150));
+    drop(guard);
+    assert_eq!(
+        received
+            .recv_timeout(Duration::from_secs(2))
+            .expect("return")
+            .expect("wait"),
+        WaitOutcome::Events(vec![])
+    );
 }
+
 #[test]
 fn stopped_run_returns_stopped_without_the_lock() {
-    stop_while_blocked_returns_stopped_within_1s();
+    let (_temp, mut store, _clock) = setup();
+    let run = runs::start_run(&mut store, false).expect("run").id;
+    runs::stop_run(&mut store, &run, StopReason::End).expect("stop");
+    let path = store.dir().join(events::WAIT_LOCK);
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .expect("lock");
+    let mut lock = fd_lock::RwLock::new(file);
+    let _guard = lock.write().expect("hold");
+    let start = Instant::now();
+    assert_eq!(
+        events::wait(&mut store, &run, None, nz(10)).expect("wait"),
+        WaitOutcome::Stopped
+    );
+    assert!(start.elapsed() < Duration::from_millis(450));
 }
+
 #[test]
 fn wait_unknown_run_is_run_unknown() {
-    let (_t, mut s, _c) = setup();
-    let err = events::wait(
-        &mut s,
-        &RunId::new("r_missing"),
-        Some(Duration::ZERO),
-        NonZeroU32::MIN,
-    )
-    .expect_err("missing");
-    assert_eq!(err.code(), "run_unknown");
-    assert!(err.to_string().contains("r_missing"));
+    let (_temp, mut store, _clock) = setup();
+    assert_error(
+        events::wait(
+            &mut store,
+            &RunId::new("r_000000000000"),
+            Some(Duration::ZERO),
+            nz(10),
+        ),
+        "run_unknown",
+        "r_000000000000",
+    );
 }
+
 #[test]
 fn wait_renews_the_lease_at_most_every_60s() {
-    assert_eq!(events::RENEW_INTERVAL, Duration::from_secs(60));
+    let (temp, mut store, clock) = setup();
+    let run = runs::start_run(&mut store, false).expect("run").id;
+    clock.set(Timestamp::from_unix_millis(T0 + 10_000));
+    let received = spawn_wait(&temp, clock.clone(), run.clone(), None);
+    wait_for_lock(&store.dir().join(events::WAIT_LOCK));
+    assert_eq!(run_row(&mut store, &run).1, "2026-10-23T00:30:10.000Z");
+    clock.set(Timestamp::from_unix_millis(T0 + 69_999));
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(run_row(&mut store, &run).1, "2026-10-23T00:30:10.000Z");
+    clock.set(Timestamp::from_unix_millis(T0 + 70_000));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while run_row(&mut store, &run).1 == "2026-10-23T00:30:10.000Z" {
+        assert!(Instant::now() < deadline, "lease not renewed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(run_row(&mut store, &run).1, "2026-10-23T00:31:10.000Z");
+    runs::stop_run(&mut store, &run, StopReason::End).expect("stop");
+    assert_eq!(
+        received
+            .recv_timeout(Duration::from_secs(2))
+            .expect("return")
+            .expect("wait"),
+        WaitOutcome::Stopped
+    );
 }
+
 #[test]
 fn wait_holds_no_write_lock_while_blocked() {
-    assert_eq!(events::POLL_INTERVAL, Duration::from_millis(250));
+    let (temp, mut store, clock) = setup();
+    let run = runs::start_run(&mut store, false).expect("run").id;
+    let received = spawn_wait(&temp, clock, run.clone(), None);
+    wait_for_lock(&store.dir().join(events::WAIT_LOCK));
+    let conn = Connection::open(store.dir().join("store.db")).expect("connection");
+    conn.busy_timeout(Duration::ZERO).expect("timeout");
+    for _ in 0..8 {
+        conn.execute_batch("BEGIN IMMEDIATE; COMMIT;")
+            .expect("write lock free");
+        std::thread::sleep(Duration::from_millis(125));
+    }
+    runs::stop_run(&mut store, &run, StopReason::End).expect("stop");
+    assert_eq!(
+        received
+            .recv_timeout(Duration::from_secs(2))
+            .expect("return")
+            .expect("wait"),
+        WaitOutcome::Stopped
+    );
 }
+
 #[test]
 fn wait_on_a_lapsed_run_commits_the_expiry() {
-    stop_while_blocked_returns_stopped_within_1s();
+    let (_temp, mut store, clock) = setup();
+    let run = runs::start_run(&mut store, false).expect("run").id;
+    let id = append_generate(&mut store);
+    let _ = events::wait(&mut store, &run, Some(Duration::ZERO), nz(10)).expect("claim");
+    clock.set(Timestamp::from_unix_millis(T0 + 45 * 60_000));
+    assert_eq!(
+        events::wait(&mut store, &run, Some(Duration::ZERO), nz(10)).expect("lapse"),
+        WaitOutcome::Stopped
+    );
+    assert_eq!(
+        run_row(&mut store, &run),
+        (
+            "expired".into(),
+            "2026-10-23T00:30:00.000Z".into(),
+            Some("2026-10-23T00:45:00.000Z".into())
+        )
+    );
+    assert_eq!(event_row(&mut store, &id).0, "pending");
+    assert_eq!(event_row(&mut store, &id).1, None);
 }
+
 #[test]
 fn lapse_while_blocked_returns_stopped_without_claiming() {
-    stop_while_blocked_returns_stopped_within_1s();
+    let (temp, mut store, clock) = setup();
+    let run = runs::start_run(&mut store, false).expect("run").id;
+    let received = spawn_wait(&temp, clock.clone(), run.clone(), None);
+    wait_for_lock(&store.dir().join(events::WAIT_LOCK));
+    clock.set(Timestamp::from_unix_millis(T0 + 31 * 60_000));
+    let mut writer = open_with_clock(&temp, clock);
+    let id = append_generate(&mut writer);
+    assert_eq!(
+        received
+            .recv_timeout(Duration::from_secs(2))
+            .expect("return")
+            .expect("wait"),
+        WaitOutcome::Stopped
+    );
+    assert_eq!(run_row(&mut store, &run).0, "expired");
+    assert_eq!(event_row(&mut store, &id).0, "pending");
+    assert_eq!(event_row(&mut store, &id).1, None);
 }
+
 #[test]
 fn claims_return_to_pending_on_stop_and_the_next_run_gets_them() {
-    wait_returns_claimed_then_pending_by_seq_up_to_max();
+    let (_temp, mut store, _clock) = setup();
+    let a = runs::start_run(&mut store, false).expect("a").id;
+    for id in ["e1", "e2", "e3"] {
+        insert_pending(&mut store, id);
+    }
+    let _ = events::wait(&mut store, &a, Some(Duration::ZERO), nz(2)).expect("claim");
+    runs::stop_run(&mut store, &a, StopReason::End).expect("stop");
+    assert_eq!(event_row(&mut store, "e1").0, "pending");
+    let b = runs::start_run(&mut store, false).expect("b").id;
+    let WaitOutcome::Events(got) =
+        events::wait(&mut store, &b, Some(Duration::ZERO), nz(10)).expect("wait")
+    else {
+        panic!("events")
+    };
+    assert_eq!(
+        got.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+        vec!["e1", "e2", "e3"]
+    );
 }
+
 #[test]
 fn claims_return_to_pending_on_expiry_and_the_next_run_gets_them() {
-    wait_returns_claimed_then_pending_by_seq_up_to_max();
+    let (_temp, mut store, clock) = setup();
+    let a = runs::start_run(&mut store, false).expect("a").id;
+    for id in ["e1", "e2", "e3"] {
+        insert_pending(&mut store, id);
+    }
+    let _ = events::wait(&mut store, &a, Some(Duration::ZERO), nz(2)).expect("claim");
+    clock.set(Timestamp::from_unix_millis(T0 + 30 * 60_000));
+    let b = runs::start_run(&mut store, false).expect("b").id;
+    let WaitOutcome::Events(got) =
+        events::wait(&mut store, &b, Some(Duration::ZERO), nz(10)).expect("wait")
+    else {
+        panic!("events")
+    };
+    assert_eq!(got.len(), 3);
+    assert_eq!(run_row(&mut store, &a).0, "expired");
 }
+
 #[test]
 fn takeover_hands_claims_to_the_new_run() {
-    wait_returns_claimed_then_pending_by_seq_up_to_max();
+    let (_temp, mut store, _clock) = setup();
+    let a = runs::start_run(&mut store, false).expect("a").id;
+    insert_pending(&mut store, "e1");
+    let _ = events::wait(&mut store, &a, Some(Duration::ZERO), nz(10)).expect("claim");
+    let b = runs::start_run(&mut store, true).expect("b").id;
+    let WaitOutcome::Events(got) =
+        events::wait(&mut store, &b, Some(Duration::ZERO), nz(10)).expect("wait")
+    else {
+        panic!("events")
+    };
+    assert_eq!(got[0].id, "e1");
+    assert_eq!(event_row(&mut store, "e1").1.as_deref(), Some(b.as_str()));
 }
+
 #[test]
 fn events_appended_with_no_active_run_reach_the_next_run() {
-    wait_returns_claimed_then_pending_by_seq_up_to_max();
+    let (_temp, mut store, _clock) = setup();
+    insert_pending(&mut store, "e1");
+    let a = runs::start_run(&mut store, false).expect("a").id;
+    assert!(matches!(
+        events::wait(&mut store, &a, Some(Duration::ZERO), nz(10)),
+        Ok(WaitOutcome::Events(_))
+    ));
+    runs::stop_run(&mut store, &a, StopReason::End).expect("stop");
+    insert_pending(&mut store, "e2");
+    let b = runs::start_run(&mut store, false).expect("b").id;
+    let WaitOutcome::Events(got) =
+        events::wait(&mut store, &b, Some(Duration::ZERO), nz(10)).expect("wait")
+    else {
+        panic!("events")
+    };
+    assert_eq!(got.len(), 2);
 }
+
+fn claimed_event() -> (TempDir, Store, Arc<FakeClock>, RunId, String) {
+    let (temp, mut store, clock) = setup();
+    let run = runs::start_run(&mut store, false).expect("run").id;
+    let id = append_generate(&mut store);
+    let _ = events::wait(&mut store, &run, Some(Duration::ZERO), nz(10)).expect("claim");
+    (temp, store, clock, run, id)
+}
+
 #[test]
 fn with_result_marks_done_in_the_closures_transaction() {
-    let (_t, mut s, _c) = setup();
-    let r = runs::start_run(&mut s, false).expect("run").id;
-    pending(&mut s, "e");
-    events::wait(&mut s, &r, Some(Duration::ZERO), NonZeroU32::MIN).expect("claim");
-    let got = events::with_result(&mut s, &r, "e", ResultKind::Message, |_| {
-        Ok::<_, StoreError>("m".into())
+    let (_temp, mut store, _clock, run, id) = claimed_event();
+    let result = events::with_result(&mut store, &run, &id, ResultKind::Message, |tx| {
+        tx.execute(
+            "INSERT INTO notices(kind,ref,created_at) VALUES ('guide_ready','x','t')",
+            [],
+        )?;
+        Ok::<_, StoreError>("m1".into())
     })
     .expect("result");
-    assert_eq!(got.id, "m");
+    assert_eq!(result.kind, ResultKind::Message);
+    assert_eq!(
+        event_row(&mut store, &id),
+        (
+            "done".into(),
+            Some(run.to_string()),
+            Some("2026-10-23T00:00:00.000Z".into()),
+            Some("message".into()),
+            Some("m1".into()),
+            Some("2026-10-23T00:00:00.000Z".into())
+        )
+    );
+    assert_eq!(
+        store
+            .tx(|tx| tx
+                .query_row("SELECT count(*) FROM notices", [], |r| r.get::<_, i64>(0))
+                .map_err(StoreError::from))
+            .expect("notices"),
+        1
+    );
 }
+
 #[test]
 fn duplicate_result_returns_the_first_and_skips_the_closure() {
-    with_result_marks_done_in_the_closures_transaction();
+    let (_temp, mut store, clock, run, id) = claimed_event();
+    let _ = events::with_result(&mut store, &run, &id, ResultKind::Message, |_| {
+        Ok::<_, StoreError>("m1".into())
+    })
+    .expect("first");
+    let before = event_row(&mut store, &id);
+    clock.advance(Duration::from_secs(1));
+    let mut called = false;
+    let result = events::with_result(&mut store, &run, &id, ResultKind::Ack, |_| {
+        called = true;
+        Ok::<_, StoreError>("other".into())
+    })
+    .expect("repeat");
+    assert_eq!(
+        result,
+        events::ResultRef {
+            kind: ResultKind::Message,
+            id: "m1".into()
+        }
+    );
+    assert!(!called);
+    assert_eq!(event_row(&mut store, &id), before);
 }
+
 #[test]
 fn closure_error_rolls_back_the_result() {
-    with_result_marks_done_in_the_closures_transaction();
+    let (_temp, mut store, _clock, run, id) = claimed_event();
+    let result = events::with_result(&mut store, &run, &id, ResultKind::Message, |tx| {
+        tx.execute(
+            "INSERT INTO notices(kind,ref,created_at) VALUES ('guide_ready','x','t')",
+            [],
+        )?;
+        Err::<String, _>(StoreError::EventUnknown {
+            event_id: "marker".into(),
+        })
+    });
+    assert_error(result, "event_unknown", "marker");
+    assert_eq!(
+        store
+            .tx(|tx| tx
+                .query_row("SELECT count(*) FROM notices", [], |r| r.get::<_, i64>(0))
+                .map_err(StoreError::from))
+            .expect("notices"),
+        0
+    );
+    assert_eq!(event_row(&mut store, &id).0, "claimed");
 }
+
 #[test]
 fn done_update_failure_rolls_back_the_closure() {
-    with_result_marks_done_in_the_closures_transaction();
+    let (temp, mut store, _clock, run, id) = claimed_event();
+    let conn =
+        Connection::open(temp.path().join("prs/github.com/octo/repo/42/store.db")).expect("raw");
+    conn.execute_batch("CREATE TRIGGER fail_done BEFORE UPDATE OF state ON events WHEN NEW.state='done' BEGIN SELECT RAISE(ABORT,'injected'); END;").expect("trigger");
+    let result = events::with_result(&mut store, &run, &id, ResultKind::Message, |tx| {
+        tx.execute(
+            "INSERT INTO notices(kind,ref,created_at) VALUES ('guide_ready','x','t')",
+            [],
+        )?;
+        Ok::<_, StoreError>("m1".into())
+    });
+    assert_error(result, "store_sqlite", "injected");
+    assert_eq!(
+        store
+            .tx(|tx| tx
+                .query_row("SELECT count(*) FROM notices", [], |r| r.get::<_, i64>(0))
+                .map_err(StoreError::from))
+            .expect("notices"),
+        0
+    );
+    assert_eq!(event_row(&mut store, &id).0, "claimed");
 }
+
 #[test]
 fn unknown_event_is_event_unknown() {
-    let (_t, mut s, _c) = setup();
-    let r = runs::start_run(&mut s, false).expect("run").id;
-    let err = events::with_result(&mut s, &r, "none", ResultKind::Ack, |_| {
+    let (_temp, mut store, _clock, run, _id) = claimed_event();
+    let mut called = false;
+    let result = events::with_result(&mut store, &run, "nope", ResultKind::Ack, |_| {
+        called = true;
         Ok::<_, StoreError>("x".into())
-    })
-    .expect_err("unknown");
-    assert_eq!(err.code(), "event_unknown");
+    });
+    assert_error(result, "event_unknown", "nope");
+    assert!(!called);
 }
+
 #[test]
 fn result_needs_a_claim_by_this_run() {
-    unknown_event_is_event_unknown();
+    let (_temp, mut store, _clock, a, _id) = claimed_event();
+    insert_pending(&mut store, "pending");
+    let x = RunId::new("r_x");
+    store
+        .tx(|tx| {
+            tx.execute(
+                "INSERT INTO runs VALUES (?1,'stopped','t','t','t','end')",
+                [x.as_str()],
+            )?;
+            Ok::<_, StoreError>(())
+        })
+        .expect("x");
+    insert_event(&mut store, "other", "claimed", Some(&x), Some("t"));
+    insert_event(&mut store, "done", "done", Some(&x), Some("t"));
+    store
+        .tx(|tx| {
+            tx.execute(
+                "UPDATE events SET result_kind='message',result_id='m' WHERE id='done'",
+                [],
+            )?;
+            Ok::<_, StoreError>(())
+        })
+        .expect("done");
+    for id in ["pending", "other", "done"] {
+        let mut called = false;
+        let result = events::with_result(&mut store, &a, id, ResultKind::Ack, |_| {
+            called = true;
+            Ok::<_, StoreError>("x".into())
+        });
+        assert_error(result, "event_not_claimed", id);
+        assert!(!called);
+    }
 }
+
 #[test]
 fn result_on_a_stopped_run_is_run_stopped() {
-    stop_while_blocked_returns_stopped_within_1s();
+    let (_temp, mut store, _clock, run, id) = claimed_event();
+    let _ = events::with_result(&mut store, &run, &id, ResultKind::Message, |_| {
+        Ok::<_, StoreError>("m1".into())
+    })
+    .expect("done");
+    runs::stop_run(&mut store, &run, StopReason::End).expect("stop");
+    let result = events::with_result(&mut store, &run, &id, ResultKind::Ack, |_| {
+        Ok::<_, StoreError>("x".into())
+    });
+    assert_error(result, "run_stopped", run.as_str());
 }
+
 #[test]
 fn result_on_a_lapsed_run_commits_the_expiry() {
-    stop_while_blocked_returns_stopped_within_1s();
+    let (_temp, mut store, clock, run, id) = claimed_event();
+    clock.set(Timestamp::from_unix_millis(T0 + 45 * 60_000));
+    let result = events::with_result(&mut store, &run, &id, ResultKind::Ack, |_| {
+        Ok::<_, StoreError>("x".into())
+    });
+    assert_error(result, "run_stopped", run.as_str());
+    assert_eq!(run_row(&mut store, &run).0, "expired");
+    assert_eq!(event_row(&mut store, &id).0, "pending");
 }
+
 #[test]
 fn ack_records_kind_ack_and_repeats() {
-    with_result_marks_done_in_the_closures_transaction();
+    let (_temp, mut store, _clock, run, id) = claimed_event();
+    assert_eq!(
+        events::ack(&mut store, &run, &id).expect("ack"),
+        events::ResultRef {
+            kind: ResultKind::Ack,
+            id: id.clone()
+        }
+    );
+    let before = event_row(&mut store, &id);
+    assert_eq!(
+        events::ack(&mut store, &run, &id).expect("repeat"),
+        events::ResultRef {
+            kind: ResultKind::Ack,
+            id: id.clone()
+        }
+    );
+    assert_eq!(event_row(&mut store, &id), before);
+    let id2 = append_generate(&mut store);
+    let _ = events::wait(&mut store, &run, Some(Duration::ZERO), nz(10)).expect("claim");
+    let _ = events::with_result(&mut store, &run, &id2, ResultKind::Message, |_| {
+        Ok::<_, StoreError>("m2".into())
+    })
+    .expect("message");
+    assert_eq!(
+        events::ack(&mut store, &run, &id2).expect("stored"),
+        events::ResultRef {
+            kind: ResultKind::Message,
+            id: "m2".into()
+        }
+    );
 }
+
 #[test]
 fn result_unknown_run_is_run_unknown() {
-    wait_unknown_run_is_run_unknown();
+    let (_temp, mut store, _clock) = setup();
+    let mut called = false;
+    let result = events::with_result(
+        &mut store,
+        &RunId::new("r_000000000000"),
+        "e",
+        ResultKind::Ack,
+        |_| {
+            called = true;
+            Ok::<_, StoreError>("x".into())
+        },
+    );
+    assert_error(result, "run_unknown", "r_000000000000");
+    assert!(!called);
 }
+
 #[test]
 fn open_for_run_finds_the_store_holding_the_run() {
-    let (t, mut s, _c) = setup();
-    let r = runs::start_run(&mut s, false).expect("run").id;
-    let found = Store::open_for_run(t.path(), &r).expect("found");
-    assert_eq!(found.dir(), s.dir());
+    let temp = tempdir().expect("temp");
+    let mut first =
+        Store::open_in(temp.path(), &PrRef::new("Octo", "Repo", 42).expect("pr")).expect("first");
+    let mut other =
+        Store::open_in(temp.path(), &PrRef::new("octo", "other", 7).expect("pr")).expect("other");
+    let mut third =
+        Store::open_in(temp.path(), &PrRef::new("zed", "repo", 1).expect("pr")).expect("third");
+    let runs = [runs::start_run(&mut first, false).expect("first").id];
+    runs::stop_run(&mut first, &runs[0], StopReason::End).expect("stop");
+    let second = runs::start_run(&mut other, false).expect("second").id;
+    runs::stop_run(&mut other, &second, StopReason::End).expect("stop");
+    let third_id = runs::start_run(&mut third, false).expect("third").id;
+    for (run, dir) in [
+        (&runs[0], first.dir()),
+        (&second, other.dir()),
+        (&third_id, third.dir()),
+    ] {
+        let found = Store::open_for_run(temp.path(), run).expect("found");
+        assert_eq!(found.dir(), dir);
+    }
 }
+
 #[test]
 fn open_for_run_unknown_run_writes_nothing() {
-    let t = tempdir().expect("temp");
-    let result = Store::open_for_run(t.path(), &RunId::new("r_none"));
-    assert!(matches!(&result, Err(error) if error.code() == "run_unknown"));
+    let temp = tempdir().expect("temp");
+    assert_error(
+        Store::open_for_run(temp.path(), &RunId::new("r_none")),
+        "run_unknown",
+        "r_none",
+    );
+    assert!(fs::read_dir(temp.path()).expect("empty").next().is_none());
+    let mut store = system_store(&temp);
+    let _ = runs::start_run(&mut store, false).expect("run");
+    let db = store.dir().join("store.db");
+    drop(store);
+    let before = fs::read(&db).expect("db");
+    assert_error(
+        Store::open_for_run(temp.path(), &RunId::new("r_none")),
+        "run_unknown",
+        "r_none",
+    );
+    assert_eq!(fs::read(db).expect("db"), before);
 }
+
 #[test]
 fn open_for_run_skips_junk_and_leaves_it_untouched() {
     let (temp, mut store, _clock) = setup();
     let run = runs::start_run(&mut store, false).expect("run").id;
     drop(store);
-    let junk = temp.path().join("prs/github.com/o/r");
-    std::fs::create_dir_all(junk.join("5")).expect("junk directory");
-    std::fs::create_dir_all(junk.join("6")).expect("empty database directory");
-    std::fs::create_dir_all(junk.join("8")).expect("invalid database directory");
-    std::fs::write(junk.join("6/store.db"), []).expect("empty database");
-    std::fs::write(junk.join("8/store.db"), "not a database").expect("invalid database");
-    let found = Store::open_for_run(temp.path(), &run).expect("real store");
+    let root = temp.path().join("prs/github.com");
+    fs::write(root.join("afile"), "file").expect("file");
+    let junk = root.join("o/r");
+    fs::create_dir_all(junk.join("abc")).expect("abc");
+    fs::write(junk.join("abc/store.db"), "text").expect("db");
+    fs::create_dir_all(junk.join("5")).expect("missing");
+    fs::create_dir_all(junk.join("6")).expect("empty");
+    fs::write(junk.join("6/store.db"), []).expect("empty");
+    fs::create_dir_all(junk.join("8")).expect("bad");
+    fs::write(junk.join("8/store.db"), "not a database").expect("bad db");
+    let found = Store::open_for_run(temp.path(), &run).expect("found");
     drop(found);
     assert_eq!(
-        std::fs::metadata(junk.join("6/store.db"))
-            .expect("metadata")
-            .len(),
+        fs::metadata(junk.join("6/store.db")).expect("empty").len(),
         0
     );
     assert_eq!(
-        std::fs::read(junk.join("8/store.db")).expect("invalid database"),
+        fs::read(junk.join("8/store.db")).expect("bad"),
         b"not a database"
     );
-    assert!(!junk.join("5/store.db").exists());
-    assert!(!junk.join("6/store.db-wal").exists());
-    assert!(!junk.join("6/store.db-shm").exists());
-    assert!(!junk.join("8/store.db-wal").exists());
-    assert!(!junk.join("8/store.db-shm").exists());
+    for path in [
+        junk.join("5/store.db"),
+        junk.join("6/store.db-wal"),
+        junk.join("6/store.db-shm"),
+        junk.join("8/store.db-wal"),
+        junk.join("8/store.db-shm"),
+    ] {
+        assert!(!path.exists(), "{}", path.display());
+    }
 }
+
 #[test]
 fn event_error_codes_are_stable() {
-    assert_eq!(
-        StoreError::EventUnknown {
-            event_id: "e".into()
-        }
-        .code(),
-        "event_unknown"
-    );
-    assert_eq!(
-        StoreError::EventNotClaimed {
-            event_id: "e".into(),
-            run_id: "r".into()
-        }
-        .code(),
-        "event_not_claimed"
+    let cases = [
+        (
+            StoreError::EventUnknown {
+                event_id: "e".into(),
+            },
+            "event_unknown",
+            "no event e in this store",
+        ),
+        (
+            StoreError::EventNotClaimed {
+                event_id: "e".into(),
+                run_id: "r".into(),
+            },
+            "event_not_claimed",
+            "event e is not claimed by run r",
+        ),
+        (
+            StoreError::WaitActive {
+                path: "/tmp/wait.lock".into(),
+            },
+            "wait_active",
+            "another prguide wait is already listening on this PR (it holds /tmp/wait.lock)",
+        ),
+    ];
+    for (error, code, message) in cases {
+        assert_eq!(error.code(), code);
+        assert_eq!(error.to_string(), message);
+    }
+}
+
+fn child(home: &TempDir, args: &[&str]) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_prguide"))
+        .args(args)
+        .env("PRGUIDE_HOME", home.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("child")
+}
+
+fn child_output(home: &TempDir, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_prguide"))
+        .args(args)
+        .env("PRGUIDE_HOME", home.path())
+        .output()
+        .expect("child")
+}
+
+fn wait_child(child: Child) -> std::process::Output {
+    let (sent, received) = mpsc::channel();
+    std::thread::spawn(move || {
+        sent.send(child.wait_with_output().expect("output"))
+            .expect("send");
+    });
+    received
+        .recv_timeout(Duration::from_secs(10))
+        .expect("child hung")
+}
+
+fn json_error(output: &std::process::Output, code: &str, contains: &str) {
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let value: Value = serde_json::from_slice(&output.stderr).expect("error json");
+    assert_eq!(value["code"], code);
+    assert!(
+        value["message"]
+            .as_str()
+            .expect("message")
+            .contains(contains)
     );
 }
+
 #[test]
 fn cli_wait_returns_stopped_within_1s_when_the_run_stops() {
-    stop_while_blocked_returns_stopped_within_1s();
+    let temp = tempdir().expect("temp");
+    let mut store = system_store(&temp);
+    let run = runs::start_run(&mut store, false).expect("run").id;
+    let listener = child(&temp, &["wait", "--run", run.as_str()]);
+    wait_for_lock(&store.dir().join(events::WAIT_LOCK));
+    let start = Instant::now();
+    runs::stop_run(&mut store, &run, StopReason::End).expect("stop");
+    let output = wait_child(listener);
+    assert!(start.elapsed() < Duration::from_secs(1));
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"{\"stopped\":true}\n");
+    assert!(output.stderr.is_empty());
 }
+
 #[test]
 fn cli_second_wait_is_wait_active() {
-    second_wait_gets_wait_active();
+    let temp = tempdir().expect("temp");
+    let mut store = system_store(&temp);
+    let run = runs::start_run(&mut store, false).expect("run").id;
+    let listener = child(&temp, &["wait", "--run", run.as_str()]);
+    wait_for_lock(&store.dir().join(events::WAIT_LOCK));
+    json_error(
+        &child_output(&temp, &["wait", "--run", run.as_str(), "--timeout", "0s"]),
+        "wait_active",
+        "wait.lock",
+    );
+    runs::stop_run(&mut store, &run, StopReason::End).expect("stop");
+    assert_eq!(wait_child(listener).stdout, b"{\"stopped\":true}\n");
 }
+
 #[test]
 fn cli_killed_wait_releases_the_lock() {
-    wait_times_out_on_the_store_clock();
+    let temp = tempdir().expect("temp");
+    let mut store = system_store(&temp);
+    let run = runs::start_run(&mut store, false).expect("run").id;
+    let mut listener = child(&temp, &["wait", "--run", run.as_str()]);
+    wait_for_lock(&store.dir().join(events::WAIT_LOCK));
+    listener.kill().expect("kill");
+    let _ = listener.wait().expect("reap");
+    let output = child_output(&temp, &["wait", "--run", run.as_str(), "--timeout", "0s"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"{\"events\":[]}\n");
 }
+
 #[test]
 fn cli_wait_prints_events_and_bounds_the_batch() {
-    wait_returns_claimed_then_pending_by_seq_up_to_max();
+    let temp = tempdir().expect("temp");
+    let mut store = system_store(&temp);
+    let run = runs::start_run(&mut store, false).expect("run").id;
+    for _ in 0..15 {
+        append_generate(&mut store);
+    }
+    let output = child_output(&temp, &["wait", "--run", run.as_str(), "--timeout", "0s"]);
+    assert_eq!(output.status.code(), Some(0));
+    let value: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(value["events"].as_array().expect("events").len(), 10);
+    assert_eq!(value["events"][0]["seq"], 1);
+    runs::stop_run(&mut store, &run, StopReason::End).expect("stop");
+    let second = runs::start_run(&mut store, false).expect("run").id;
+    let output = child_output(
+        &temp,
+        &[
+            "wait",
+            "--run",
+            second.as_str(),
+            "--max",
+            "3",
+            "--timeout",
+            "0s",
+        ],
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(value["events"].as_array().expect("events").len(), 3);
 }
+
 #[test]
 fn cli_wait_timeout_returns_empty_events() {
-    wait_times_out_on_the_store_clock();
+    let temp = tempdir().expect("temp");
+    let mut store = system_store(&temp);
+    let run = runs::start_run(&mut store, false).expect("run").id;
+    let start = Instant::now();
+    let output = child_output(&temp, &["wait", "--run", run.as_str(), "--timeout", "1s"]);
+    assert!(start.elapsed() >= Duration::from_secs(1));
+    assert!(start.elapsed() < Duration::from_secs(5));
+    assert_eq!(output.stdout, b"{\"events\":[]}\n");
 }
+
 #[test]
 fn cli_wait_on_a_stopped_run_prints_stopped() {
-    stop_while_blocked_returns_stopped_within_1s();
+    let temp = tempdir().expect("temp");
+    let mut store = system_store(&temp);
+    let run = runs::start_run(&mut store, false).expect("run").id;
+    runs::stop_run(&mut store, &run, StopReason::End).expect("stop");
+    let output = child_output(&temp, &["wait", "--run", run.as_str()]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"{\"stopped\":true}\n");
 }
+
 #[test]
 fn cli_unknown_run_is_run_unknown() {
-    wait_unknown_run_is_run_unknown();
+    let temp = tempdir().expect("temp");
+    let _store = system_store(&temp);
+    for args in [
+        ["wait", "--run", "r_000000000000", "--timeout", "0s"].as_slice(),
+        ["ack", "e", "--run", "r_000000000000"].as_slice(),
+    ] {
+        json_error(&child_output(&temp, args), "run_unknown", "r_000000000000");
+    }
 }
+
 #[test]
 fn cli_bad_timeout_and_max_are_usage() {
-    assert_eq!(events::DEFAULT_MAX, 10);
+    let temp = tempdir().expect("temp");
+    for input in [
+        "",
+        "4",
+        "m",
+        "4x",
+        "-1s",
+        "+4m",
+        " 4m",
+        "4m ",
+        "4 m",
+        "1.5m",
+        "4M",
+        "4S",
+        "4m30s",
+        "4ms",
+        "٤m",
+        "18446744073709551616s",
+        "307445734561825861m",
+    ] {
+        json_error(
+            &child_output(
+                &temp,
+                &["wait", "--run", "r_x", &format!("--timeout={input}")],
+            ),
+            "usage",
+            input,
+        );
+    }
+    json_error(
+        &child_output(&temp, &["wait", "--run", "r_x", "--max", "0"]),
+        "usage",
+        "--max",
+    );
+    assert!(fs::read_dir(temp.path()).expect("empty").next().is_none());
 }
+
 #[test]
 fn cli_ack_prints_the_result_and_repeats() {
-    with_result_marks_done_in_the_closures_transaction();
+    let temp = tempdir().expect("temp");
+    let mut store = system_store(&temp);
+    let run = runs::start_run(&mut store, false).expect("run").id;
+    let id = append_generate(&mut store);
+    let _ = events::wait(&mut store, &run, Some(Duration::ZERO), nz(10)).expect("claim");
+    let expected =
+        format!("{{\"event\":\"{id}\",\"result_kind\":\"ack\",\"result_id\":\"{id}\"}}\n");
+    for _ in 0..2 {
+        let output = child_output(&temp, &["ack", &id, "--run", run.as_str()]);
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(output.stdout, expected.as_bytes());
+    }
+    let pending = append_generate(&mut store);
+    json_error(
+        &child_output(&temp, &["ack", "none", "--run", run.as_str()]),
+        "event_unknown",
+        "none",
+    );
+    json_error(
+        &child_output(&temp, &["ack", &pending, "--run", run.as_str()]),
+        "event_not_claimed",
+        &pending,
+    );
+    runs::stop_run(&mut store, &run, StopReason::End).expect("stop");
+    json_error(
+        &child_output(&temp, &["ack", &id, "--run", run.as_str()]),
+        "run_stopped",
+        run.as_str(),
+    );
 }
+
 #[test]
 fn cli_ack_after_a_reply_prints_the_stored_result() {
-    with_result_marks_done_in_the_closures_transaction();
+    let temp = tempdir().expect("temp");
+    let mut store = system_store(&temp);
+    let run = runs::start_run(&mut store, false).expect("run").id;
+    let id = append_generate(&mut store);
+    let _ = events::wait(&mut store, &run, Some(Duration::ZERO), nz(10)).expect("claim");
+    let _ = events::with_result(&mut store, &run, &id, ResultKind::Message, |_| {
+        Ok::<_, StoreError>("m1".into())
+    })
+    .expect("reply");
+    let output = child_output(&temp, &["ack", &id, "--run", run.as_str()]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        output.stdout,
+        format!("{{\"event\":\"{id}\",\"result_kind\":\"message\",\"result_id\":\"m1\"}}\n")
+            .as_bytes()
+    );
 }

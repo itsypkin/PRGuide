@@ -278,6 +278,11 @@ impl Store {
                     ) else {
                         continue;
                     };
+                    if owner_name != owner_name.to_ascii_lowercase()
+                        || repo_name != repo_name.to_ascii_lowercase()
+                    {
+                        continue;
+                    }
                     let Ok(number_value) = number_name.parse::<u64>() else {
                         continue;
                     };
