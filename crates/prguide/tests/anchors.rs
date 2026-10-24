@@ -482,6 +482,18 @@ fn resolve_stubs() {
             message,
         );
     }
+    expect_err(
+        r.resolve(&cx, &dblock("logo.bin", Side::New, None, Some(1))),
+        "range_not_allowed",
+        "start",
+        "is a binary file;",
+    );
+    expect_err(
+        r.resolve(&cx, &dblock("logo.bin", Side::New, Some(1), None)),
+        "range_not_allowed",
+        "start",
+        "is a binary file;",
+    );
     let old = r.resolve(&cx, &bare("logo.bin", Side::Old)).unwrap();
     assert_eq!(old.stub, Some(Stub::Binary));
     assert_eq!(old.rev, r.b);
@@ -538,15 +550,40 @@ fn resolve_lines_out_of_range() {
     );
     r.resolve(&cx, &dnew("src/a.rs", 42, 60)).unwrap();
     let e = anchor_err(r.resolve(&cx, &dold("gone.rs", 1, 11)));
+    assert_eq!(e.code(), "lines_out_of_range");
     assert_eq!(e.field(), "end");
     assert!(e.to_string().contains("which has 10 lines"), "{e}");
     assert!(e.to_string().contains("side old"), "{e}");
     let e = anchor_err(r.resolve(&cx, &cblock("ctx.rs", At::SnapshotHead, 15, 21)));
     assert_eq!(e.code(), "lines_out_of_range");
+    assert_eq!(e.field(), "end");
     assert!(e.to_string().contains("at snapshot-head"), "{e}");
     assert!(e.to_string().contains("which has 20 lines"), "{e}");
     r.resolve(&cx, &cblock("ctx.rs", At::SnapshotHead, 15, 20))
         .unwrap();
+
+    // Line counting: empty blob has 0 lines; a last line without "\n" counts.
+    let fx = FixtureRepo::new();
+    let base = fx.head();
+    fx.write("e.txt", b"");
+    fx.write("n.txt", "a\nb\nc\nd\ne");
+    let head = fx.commit("head");
+    let cx = context(&fx, &base, &head, &[&head], Selection::Full);
+    let git = fx.git(fx.work_path());
+    expect_err(
+        resolve(&git, &cblock("e.txt", At::SnapshotHead, 1, 1), &cx),
+        "lines_out_of_range",
+        "end",
+        "which has 0 lines",
+    );
+    let ok = resolve(&git, &cblock("n.txt", At::SnapshotHead, 5, 5), &cx).unwrap();
+    assert_eq!(text_of(&ok.lines), vec![b"e".as_slice()]);
+    expect_err(
+        resolve(&git, &cblock("n.txt", At::SnapshotHead, 5, 6), &cx),
+        "lines_out_of_range",
+        "end",
+        "which has 5 lines",
+    );
 }
 
 #[test]
@@ -656,6 +693,14 @@ fn context_overlaps_hunk_warning() {
     assert!(warn(&cx, At::SnapshotHead, 1, 16).is_empty());
     assert!(warn(&cx, At::SnapshotHead, 17, 19).is_empty());
     assert_eq!(warn(&cx, At::SelectionBase, 20, 20).len(), 1);
+    let ctxw = |path: &str, s, e| {
+        r.resolve(&cx, &cblock(path, At::SelectionBase, s, e))
+            .unwrap()
+            .warnings
+    };
+    assert_eq!(ctxw("gone.rs", 1, 1).len(), 1); // deleted file
+    assert_eq!(ctxw("old.rs", 10, 10).len(), 1); // renamed file, old path
+    assert!(ctxw("old.rs", 1, 3).is_empty());
     let rc = r.range();
     assert!(warn(&rc, At::SnapshotHead, 20, 20).is_empty());
     assert_eq!(warn(&rc, At::SelectionHead, 20, 20).len(), 1);
