@@ -31,6 +31,24 @@ pub enum GitError {
     /// `git diff` output that the parser's grammar doesn't accept.
     #[error("cannot parse git diff at line {line}: {message}")]
     DiffParse { line: usize, message: String },
+    /// The store belongs to a different clone.
+    #[error(
+        "the store for {pr} is bound to the clone whose git dir is {bound}; this clone's git dir is {current}. Run prguide start from the bound clone"
+    )]
+    StoreBound {
+        pr: String,
+        bound: String,
+        current: String,
+    },
+    /// GitHub's PR head differs from what was fetched.
+    #[error(
+        "the PR head moved while starting: GitHub reports {expected} but refs/pull/{number}/head fetched {fetched}; run prguide start again"
+    )]
+    PrHeadMoved {
+        number: u64,
+        expected: String,
+        fetched: String,
+    },
 }
 
 impl GitError {
@@ -42,6 +60,8 @@ impl GitError {
             Self::NotInClone(_) => "not_in_clone",
             Self::InvalidRef { .. } => "invalid_ref",
             Self::DiffParse { .. } => "diff_parse",
+            Self::StoreBound { .. } => "store_bound",
+            Self::PrHeadMoved { .. } => "pr_head_moved",
         }
     }
 }
@@ -118,6 +138,24 @@ mod tests {
             }
             .code(),
             "diff_parse"
+        );
+        assert_eq!(
+            GitError::StoreBound {
+                pr: "x".into(),
+                bound: "x".into(),
+                current: "x".into()
+            }
+            .code(),
+            "store_bound"
+        );
+        assert_eq!(
+            GitError::PrHeadMoved {
+                number: 1,
+                expected: "x".into(),
+                fetched: "x".into()
+            }
+            .code(),
+            "pr_head_moved"
         );
     }
 }
