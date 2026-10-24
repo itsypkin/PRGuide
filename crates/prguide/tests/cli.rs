@@ -39,8 +39,6 @@ fn not_implemented(command: &mut Command, message: &str) {
 #[test]
 fn every_command_parses_required_and_optional_arguments() {
     let cases: &[(&[&str], &str)] = &[
-        (&["start", "12"], "start"),
-        (&["start", "12", "--takeover"], "start"),
         (&["guide", "new", "--run", "r_x"], "guide new"),
         (
             &["guide", "new", "--run", "r_x", "--commits", "a..b"],

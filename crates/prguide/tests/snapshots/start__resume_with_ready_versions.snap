@@ -1,0 +1,131 @@
+---
+source: crates/prguide/tests/start.rs
+expression: ctx.snapshot_json(&out)
+---
+{
+  "run_id": "[RUN]",
+  "store": "[HOME]/prs/github.com/octo/widget/7",
+  "worktree": "[HOME]/prs/github.com/octo/widget/7/worktree",
+  "pr": {
+    "repo": "octo/widget",
+    "number": 7,
+    "url": "https://github.com/octo/widget/pull/7",
+    "state": "open",
+    "title": "Add things",
+    "body": "A body.",
+    "author": "octocat",
+    "base_ref": "main",
+    "head_sha": "050535dc182f568eed074a3c845fb06a03548241"
+  },
+  "snapshot": {
+    "base": "6556e18a42beb18e2ab799ab46ff5826b2367eb1",
+    "head": "050535dc182f568eed074a3c845fb06a03548241"
+  },
+  "commits": [
+    {
+      "sha": "3ac4775a2d7c4ad32610df05200ee68867360521",
+      "parents": [
+        "6556e18a42beb18e2ab799ab46ff5826b2367eb1"
+      ],
+      "message": "first",
+      "author": {
+        "name": "Fixture",
+        "login": null
+      }
+    },
+    {
+      "sha": "050535dc182f568eed074a3c845fb06a03548241",
+      "parents": [
+        "3ac4775a2d7c4ad32610df05200ee68867360521"
+      ],
+      "message": "second",
+      "author": {
+        "name": "Fixture",
+        "login": null
+      }
+    }
+  ],
+  "files": [
+    {
+      "path": "added.txt",
+      "old_path": null,
+      "status": "added",
+      "additions": 3,
+      "deletions": 0,
+      "binary": false,
+      "mode_only": false,
+      "submodule": false
+    },
+    {
+      "path": "bin.dat",
+      "old_path": null,
+      "status": "added",
+      "additions": 0,
+      "deletions": 0,
+      "binary": true,
+      "mode_only": false,
+      "submodule": false
+    },
+    {
+      "path": "del.txt",
+      "old_path": null,
+      "status": "deleted",
+      "additions": 0,
+      "deletions": 1,
+      "binary": false,
+      "mode_only": false,
+      "submodule": false
+    },
+    {
+      "path": "exec.sh",
+      "old_path": null,
+      "status": "modified",
+      "additions": 0,
+      "deletions": 0,
+      "binary": false,
+      "mode_only": true,
+      "submodule": false
+    },
+    {
+      "path": "mod.txt",
+      "old_path": null,
+      "status": "modified",
+      "additions": 2,
+      "deletions": 1,
+      "binary": false,
+      "mode_only": false,
+      "submodule": false
+    },
+    {
+      "path": "renamed.txt",
+      "old_path": "ren.txt",
+      "status": "renamed",
+      "additions": 1,
+      "deletions": 1,
+      "binary": false,
+      "mode_only": false,
+      "submodule": false
+    },
+    {
+      "path": "sm",
+      "old_path": null,
+      "status": "modified",
+      "additions": 0,
+      "deletions": 0,
+      "binary": false,
+      "mode_only": false,
+      "submodule": true
+    }
+  ],
+  "guide_versions": [
+    {
+      "version": 1,
+      "selection_kind": "full",
+      "snapshot_base": "sb1",
+      "snapshot_head": "sh1",
+      "selection_base": "xb1",
+      "selection_head": "xh1",
+      "ready_at": "2026-01-01T00:01:00.000Z"
+    }
+  ]
+}

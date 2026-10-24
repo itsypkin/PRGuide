@@ -12,7 +12,7 @@ use std::{
 use super::{GitError, parse_github_remote};
 use crate::git::refs::{fetch_base_ref, fetch_head_ref};
 
-const REMOVED_ENV: [&str; 7] = [
+const REMOVED_ENV: [&str; 10] = [
     "GIT_DIR",
     "GIT_WORK_TREE",
     "GIT_INDEX_FILE",
@@ -20,16 +20,16 @@ const REMOVED_ENV: [&str; 7] = [
     "GIT_NAMESPACE",
     "GIT_OBJECT_DIRECTORY",
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_ICASE_PATHSPECS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
 ];
 
-const DIFF_REMOVED_ENV: [&str; 7] = [
+const DIFF_REMOVED_ENV: [&str; 4] = [
     "GIT_CONFIG_COUNT",
     "GIT_CONFIG_PARAMETERS",
     "GIT_DIFF_OPTS",
     "GIT_ATTR_SOURCE",
-    "GIT_ICASE_PATHSPECS",
-    "GIT_GLOB_PATHSPECS",
-    "GIT_NOGLOB_PATHSPECS",
 ];
 
 /// A local repository and environment in which to run git.
@@ -92,6 +92,7 @@ impl Git {
     {
         let mut argv = vec![
             OsString::from("--literal-pathspecs"),
+            OsString::from("--no-replace-objects"),
             OsString::from("-c"),
             OsString::from("core.quotepath=off"),
             OsString::from("-C"),
@@ -139,7 +140,7 @@ impl Git {
         }
     }
 
-    fn execute<I, S>(
+    pub(super) fn execute<I, S>(
         &self,
         args: I,
         input: Option<&[u8]>,

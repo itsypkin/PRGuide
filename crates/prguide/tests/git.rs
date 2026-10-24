@@ -1209,3 +1209,50 @@ fn diff_path_filter_from_subdirectory() {
             .unwrap()
     );
 }
+
+#[test]
+fn show_ignores_pathspec_environment() {
+    let fixture = FixtureRepo::new();
+    fixture.write("a*.txt", "star\n");
+    fixture.write("ab.txt", "ab\n");
+    let head = fixture.commit("files");
+    let clean_git = fixture.git(fixture.work_path());
+    let expected: Vec<_> = ["README.md", "a*.txt"]
+        .into_iter()
+        .map(|path| clean_git.show(&head, path).unwrap())
+        .collect();
+    assert_eq!(expected[1].as_deref(), Some(&b"star\n"[..]));
+    for key in [
+        "GIT_ICASE_PATHSPECS",
+        "GIT_GLOB_PATHSPECS",
+        "GIT_NOGLOB_PATHSPECS",
+    ] {
+        let git = fixture.git(fixture.work_path()).env(key, "1");
+        for (path, want) in ["README.md", "a*.txt"].into_iter().zip(&expected) {
+            assert_eq!(&git.show(&head, path).unwrap(), want, "{key} {path}");
+        }
+    }
+}
+
+#[test]
+fn show_and_diff_ignore_replace_refs() {
+    let fixture = FixtureRepo::new();
+    let base = fixture.head();
+    fixture.write("only-head.txt", "head\n");
+    let head = fixture.commit("head");
+    let git = fixture.git(fixture.work_path());
+    let spec = DiffSpec::ThreeDot {
+        base_tip: base.clone(),
+        head: head.clone(),
+        paths: vec![],
+    };
+    let diff = git.diff(&spec).unwrap();
+    let merge_base = git.merge_base(&base, &head).unwrap();
+    fixture.run(fixture.work_path(), ["replace", &head, &base]);
+    assert_eq!(
+        git.show(&head, "only-head.txt").unwrap().as_deref(),
+        Some(&b"head\n"[..])
+    );
+    assert_eq!(git.diff(&spec).unwrap(), diff);
+    assert_eq!(git.merge_base(&base, &head).unwrap(), merge_base);
+}

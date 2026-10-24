@@ -1,0 +1,39 @@
+---
+source: crates/prguide/tests/start.rs
+expression: ctx.snapshot_json(&out)
+---
+{
+  "run_id": "[RUN]",
+  "store": "[HOME]/prs/github.com/octo/widget/7",
+  "worktree": "[HOME]/prs/github.com/octo/widget/7/worktree",
+  "pr": {
+    "repo": "octo/widget",
+    "number": 7,
+    "url": "https://github.com/octo/widget/pull/7",
+    "state": "open",
+    "title": "Add things",
+    "body": "A body.",
+    "author": "octocat",
+    "base_ref": "main",
+    "head_sha": "16629157c463e3f6797c93a631a94477e41cdd2e"
+  },
+  "snapshot": {
+    "base": "2b6725c17b17fff6f75aacd842a231f61889fcc5",
+    "head": "16629157c463e3f6797c93a631a94477e41cdd2e"
+  },
+  "commits": [
+    {
+      "sha": "16629157c463e3f6797c93a631a94477e41cdd2e",
+      "parents": [
+        "2b6725c17b17fff6f75aacd842a231f61889fcc5"
+      ],
+      "message": "empty",
+      "author": {
+        "name": "Fixture",
+        "login": null
+      }
+    }
+  ],
+  "files": [],
+  "guide_versions": []
+}
