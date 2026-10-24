@@ -233,7 +233,6 @@ impl Store {
         let mut conn = Connection::open(dir.join("store.db"))?;
         conn.busy_timeout(Duration::from_secs(5))?;
         configure_wal(&conn)?;
-
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let foreign_keys: i64 = conn.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
         require_pragma("foreign_keys", &foreign_keys.to_string(), "1")?;
@@ -302,6 +301,7 @@ impl Store {
             run_id: run_id.to_string(),
         })
     }
+
     /// Replaces the clock (tests pass an `Arc<FakeClock>` they keep a clone of).
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = clock;
