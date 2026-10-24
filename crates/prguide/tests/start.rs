@@ -1069,7 +1069,7 @@ fn hooks_never_run() {
     fs::write(first.worktree.join("junk.txt"), "j\n").unwrap();
     fs::write(first.worktree.join("a.txt"), "changed\n").unwrap();
     ctx.fx.run(
-        &ctx.fx.remote_path(),
+        ctx.fx.remote_path(),
         [
             "-c",
             "core.hooksPath=/dev/null",
