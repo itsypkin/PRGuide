@@ -1,0 +1,5 @@
+---
+source: crates/prguide/tests/status.rs
+expression: "redacted_stdout(&output, &run)"
+---
+{"run":{"id":"[RUN]","state":"active","created_at":"[TIME]","lease_until":"[TIME]","ended_at":null,"end_reason":null},"guide_versions":[{"version":1,"selection_kind":"full","snapshot_base":"sb","snapshot_head":"h1","selection_base":"xb","selection_head":"xh","ready_at":"2026-01-01T00:00:00.000Z"}],"status":"not_listening","pending":2}

@@ -114,7 +114,6 @@ fn every_command_parses_required_and_optional_arguments() {
         ),
         (&["threads", "--run", "r_x"], "threads"),
         (&["threads", "--run", "r_x", "--github"], "threads"),
-        (&["status", "--run", "r_x"], "status"),
         (&["end", "--run", "r_x"], "end"),
         (&["end", "--run", "r_x", "--clean"], "end"),
         (&["skill", "install"], "skill install"),
@@ -236,7 +235,7 @@ fn help_and_version_succeed() {
 
 #[cfg(unix)]
 mod unix {
-    use super::{not_implemented, usage};
+    use super::{error_result, not_implemented, usage};
     use assert_cmd::Command;
     use std::os::unix::fs::symlink;
     use tempfile::{TempDir, tempdir};
@@ -263,8 +262,13 @@ mod unix {
         let (_dir, mut command) = linked("prgx");
         usage(&mut command);
         let (_dir, mut command) = linked("prgx");
-        command.args(["status", "--run", "r_x"]);
-        not_implemented(&mut command, "status");
+        let home = tempdir().unwrap();
+        command
+            .args(["status", "--run", "r_x"])
+            .env("PRGUIDE_HOME", home.path());
+        let value = error_result(&mut command);
+        assert_eq!(value["code"], "run_unknown");
+        assert!(std::fs::read_dir(home.path()).unwrap().next().is_none());
     }
 
     #[test]
