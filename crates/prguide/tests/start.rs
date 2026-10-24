@@ -784,6 +784,7 @@ fn run_active_without_takeover_leaves_worktree_untouched() {
     let mut ctx = Ctx::new();
     let first = ctx.ok();
     fs::write(first.worktree.join("marker.txt"), "keep\n").unwrap();
+    let tree_before = tree_map(&first.worktree, &[]);
     ctx.advance("newer.txt", "n\n");
     let runs = ctx.runs();
     let err = ctx.start(false).unwrap_err();
@@ -794,6 +795,7 @@ fn run_active_without_takeover_leaves_worktree_untouched() {
         "{msg}"
     );
     assert!(first.worktree.join("marker.txt").exists());
+    assert_eq!(tree_map(&first.worktree, &[]), tree_before);
     assert_eq!(
         tgit(&ctx.fx, &first.worktree, &["rev-parse", "HEAD"]),
         first.pr.head_sha
@@ -913,6 +915,7 @@ fn reset_worktree_never_reaches_an_enclosing_repository() {
     let before = state(&fx, &dot, &[]);
     let err = fx.git(&dot).reset_worktree(&dir, &sha).unwrap_err();
     assert_eq!(err.code(), "git_failed");
+    assert!(err.to_string().contains("checkout"), "{err}");
     assert_eq!(state(&fx, &dot, &[]), before);
     assert_eq!(
         tgit(&fx, &dot, &["symbolic-ref", "HEAD"]),
@@ -1278,7 +1281,10 @@ fn replace_refs_do_not_change_the_worktree_or_files() {
 #[test]
 fn pr_head_moved_fails_before_touching_the_worktree() {
     let ctx = Ctx::new();
-    let base = ctx.fx.run(ctx.fx.work_path(), ["rev-parse", "main"]);
+    // An older commit of the PR itself, not the main tip.
+    let base = ctx
+        .fx
+        .run(ctx.fx.work_path(), ["rev-parse", &format!("{}^", ctx.head)]);
     ctx.fake.set_pr(&ctx.repo, ctx.pr(&base));
     let err = ctx.start(false).unwrap_err();
     assert_eq!(err.code(), "pr_head_moved");
@@ -1404,6 +1410,7 @@ fn github_error_creates_no_store() {
     );
     let err = ctx.start(false).unwrap_err();
     assert_eq!(err.code(), "pr_not_found");
+    assert!(err.to_string().contains("octo/widget#7"), "{err}");
     assert!(!ctx.home.join("prs").exists());
 
     let ctx = Ctx::new();
@@ -1415,6 +1422,7 @@ fn github_error_creates_no_store() {
         .env("GIT_CEILING_DIRECTORIES", dir.parent().unwrap());
     let err = ctx.start_with(git, false).unwrap_err();
     assert_eq!(err.code(), "not_in_clone");
+    assert!(err.to_string().contains("not inside a git clone"), "{err}");
     assert!(ctx.fake.calls().is_empty());
 }
 
@@ -1426,6 +1434,7 @@ fn fetch_failure_leaves_no_run_or_worktree() {
     let ctx = Ctx::assemble(fx, head, clone, None);
     let err = ctx.start(false).unwrap_err();
     assert_eq!(err.code(), "git_failed");
+    assert!(err.to_string().contains("fetch"), "{err}");
     assert!(!ctx.wt().exists());
     assert!(ctx.runs().is_empty());
 }
@@ -1448,6 +1457,12 @@ fn binary_start_outside_a_clone_prints_json_error() {
     assert_eq!(stderr.lines().count(), 1);
     let value: serde_json::Value = serde_json::from_str(&stderr).unwrap();
     assert_eq!(value["code"], "not_in_clone");
+    assert!(
+        value["message"]
+            .as_str()
+            .unwrap()
+            .contains("not inside a git clone")
+    );
 }
 
 #[test]
@@ -1522,6 +1537,7 @@ fn unrelated_history_fails_without_starting_a_run() {
     });
     let err = ctx.start(false).unwrap_err();
     assert_eq!(err.code(), "no_base_commit");
+    assert!(err.to_string().contains("no merge base"), "{err}");
     assert!(ctx.runs().is_empty());
 }
 
@@ -1571,6 +1587,7 @@ fn reset_worktree_rejects_a_bad_head_before_running_git() {
         .reset_worktree(&out.worktree, "abc")
         .unwrap_err();
     assert_eq!(err.code(), "invalid_ref");
+    assert!(err.to_string().contains("40 or 64"), "{err}");
     assert_exact(&ctx.fx, &out.worktree, &ctx.head);
 }
 
@@ -1604,7 +1621,160 @@ fn pr_repo_with_base_on_remotes_naming_different_repos_fails() {
     assert_eq!(err.code(), "not_in_clone");
     let msg = err.to_string();
     assert!(
-        msg.contains("me/widget") && msg.contains("octo/widget"),
+        msg.contains("me/widget")
+            && msg.contains("octo/widget")
+            && msg.contains("gh repo set-default"),
         "{msg}"
     );
+}
+
+#[test]
+fn ready_guide_versions_are_listed_oldest_first() {
+    let ctx = Ctx::new();
+    let out = ctx.ok();
+    ctx.stop(&out);
+    ctx.exec(
+        "INSERT INTO guide_versions(version,state,caused_by,snapshot_base,snapshot_head,selection_kind,selection_base,selection_head,commits_json,refs_json,created_at,ready_at) \
+         VALUES (3,'ready',NULL,'sb3','sh3','full','xb3','xh3','[]','[]','2026-01-03T00:00:00.000Z','2026-01-03T00:01:00.000Z'), \
+                (2,'staging',NULL,'sb2','sh2','full','xb2','xh2','[]','[]','2026-01-02T00:00:00.000Z',NULL), \
+                (1,'ready',NULL,'sb1','sh1','full','xb1','xh1','[]','[]','2026-01-01T00:00:00.000Z','2026-01-01T00:01:00.000Z');",
+    );
+    let out = ctx.ok();
+    let versions: Vec<i64> = out.guide_versions.iter().map(|v| v.version).collect();
+    assert_eq!(versions, vec![1, 3]);
+}
+
+#[test]
+fn url_shorthand_remote_resolves_to_its_github_repo() {
+    let fx = FixtureRepo::new();
+    let dir = fx.path().join("shorthand");
+    fx.run(fx.path(), ["init", "shorthand"]);
+    fx.run(&dir, ["remote", "add", "origin", "gh:octo/widget"]);
+    fx.run(&dir, ["config", "url.https://github.com/.insteadOf", "gh:"]);
+    assert_eq!(
+        pr_repo(&fx.git(&dir)).unwrap(),
+        ("octo".to_owned(), "widget".to_owned())
+    );
+}
+
+/// A dirty linked worktree of the reviewer's clone, outside the prguide home.
+fn dirty_linked(ctx: &Ctx, name: &str) -> PathBuf {
+    let linked = ctx.fx.path().join(name);
+    ctx.fx.run(
+        &ctx.clone,
+        [
+            "worktree",
+            "add",
+            "--detach",
+            linked.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    let linked = canon(&linked);
+    dirty(&ctx.fx, &linked);
+    linked
+}
+
+/// Start, stop, let `plant` rewrite `<store>/worktree`, then start again and check
+/// that the dirty clone and the dirty linked worktree are byte-identical and the
+/// new worktree is a real, exact one.
+fn planted_worktree(plant: impl FnOnce(&Ctx, &Path, &Path)) {
+    let ctx = Ctx::new();
+    dirty(&ctx.fx, &ctx.clone);
+    let first = ctx.ok();
+    ctx.stop(&first);
+    let wt = ctx.wt();
+    let linked = dirty_linked(&ctx, "linked");
+    plant(&ctx, &wt, &linked);
+    let skip = vec![linked.clone()];
+    let clone_before = state(&ctx.fx, &ctx.clone, &skip);
+    let linked_before = state(&ctx.fx, &linked, &[]);
+    let second = ctx.ok();
+    assert_eq!(state(&ctx.fx, &ctx.clone, &skip), clone_before);
+    assert_eq!(state(&ctx.fx, &linked, &[]), linked_before);
+    let meta = fs::symlink_metadata(&wt).unwrap();
+    assert!(meta.is_dir() && !meta.file_type().is_symlink());
+    assert!(fs::symlink_metadata(wt.join(".git")).unwrap().is_file());
+    assert_exact(&ctx.fx, &second.worktree, &ctx.head);
+}
+
+#[test]
+fn symlinked_worktree_path_is_replaced_not_followed() {
+    planted_worktree(|_, wt, linked| {
+        fs::remove_dir_all(wt).unwrap();
+        std::os::unix::fs::symlink(linked, wt).unwrap();
+    });
+}
+
+#[test]
+fn worktree_git_file_pointing_at_the_clone_is_rebuilt() {
+    planted_worktree(|ctx, wt, _| {
+        fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", ctx.clone.join(".git").display()),
+        )
+        .unwrap();
+    });
+}
+
+#[test]
+fn worktree_git_file_pointing_at_a_reviewer_worktree_is_rebuilt() {
+    planted_worktree(|_, wt, linked| {
+        let admin = gitdir_of(linked);
+        fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+    });
+}
+
+#[test]
+fn worktree_git_symlink_to_the_clone_git_dir_is_rebuilt() {
+    planted_worktree(|ctx, wt, _| {
+        fs::remove_file(wt.join(".git")).unwrap();
+        std::os::unix::fs::symlink(ctx.clone.join(".git"), wt.join(".git")).unwrap();
+    });
+}
+
+#[test]
+fn pr_file_named_false_never_runs() {
+    // git 2.30 reads core.fsmonitor as a hook path, so the value `false` would run
+    // a program named `false` found on PATH (with `.` on PATH: the PR's own file).
+    // Newer git reads a boolean. The test runs on every version.
+    let marker_dir = TempDir::new().unwrap();
+    let marker = marker_dir.path().join("marker");
+    let marker_in_shape = marker.clone();
+    let mut ctx = Ctx::from_shape(move |fx| {
+        on_pr(fx);
+        fx.write(
+            "false",
+            format!(
+                "#!/bin/sh\necho ran >> '{}'\nexit 0\n",
+                marker_in_shape.display()
+            ),
+        );
+        let file = fx.work_path().join("false");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+        fx.commit("false")
+    });
+    let path = format!(".:{}", std::env::var("PATH").unwrap());
+    let git = |ctx: &Ctx| ctx.fx.git(&ctx.clone).env("PATH", path.as_str());
+    let first = ctx.start_with(git(&ctx), false).unwrap();
+    ctx.stop(&first);
+    ctx.advance("other.txt", "o\n");
+    ctx.start_with(git(&ctx), false).unwrap();
+    assert!(!marker.exists(), "a program named false ran");
+}
+
+#[test]
+fn relative_worktree_config_leaves_reviewer_config_untouched() {
+    // worktree.useRelativePaths exists from git 2.48; older git ignores it.
+    if !at_least(2, 48) {
+        eprintln!("skipped: git < 2.48");
+        return;
+    }
+    let ctx = Ctx::new();
+    gconfig(&ctx.fx, "worktree.useRelativePaths", "true");
+    let config = ctx.clone.join(".git/config");
+    let before = fs::read(&config).unwrap();
+    let out = ctx.ok();
+    assert_eq!(fs::read(&config).unwrap(), before);
+    assert_exact(&ctx.fx, &out.worktree, &ctx.head);
 }

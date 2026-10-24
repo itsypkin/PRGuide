@@ -69,7 +69,7 @@ fn pin_args() -> Vec<OsString> {
         "hook.post-checkout.enabled=false",
         "hook.reference-transaction.enabled=false",
         "hook.post-index-change.enabled=false",
-        "core.fsmonitor=false",
+        "core.fsmonitor=",
         "submodule.recurse=false",
         "core.fileMode=true",
         "core.symlinks=false",
@@ -83,6 +83,9 @@ fn pin_args() -> Vec<OsString> {
     args.push(format!("attr.tree={EMPTY_TREE}").into());
     args.push("-c".into());
     args.push("core.sparseCheckout=false".into());
+    // Else git >= 2.48 rewrites the reviewer's config for relative worktree paths.
+    args.push("-c".into());
+    args.push("worktree.useRelativePaths=false".into());
     args
 }
 
@@ -146,14 +149,22 @@ impl Git {
         path: &Path,
         drivers: &[String],
     ) -> Result<bool, GitError> {
+        // `path` must be a real directory (never a symlink to somewhere else) holding
+        // a regular `.git` file.
+        let real_dir = fs::symlink_metadata(path).is_ok_and(|m| m.is_dir());
         let is_file = fs::symlink_metadata(path.join(".git")).is_ok_and(|m| m.is_file());
-        if !is_file {
+        if !real_dir || !is_file {
             return Ok(false);
         }
         let ceiling = path.parent();
         let out = match self.with_dir(path).isolated_run(
             drivers,
-            &["rev-parse", "--git-common-dir", "--show-toplevel"],
+            &[
+                "rev-parse",
+                "--git-common-dir",
+                "--show-toplevel",
+                "--absolute-git-dir",
+            ],
             ceiling,
         ) {
             Ok(out) => out,
@@ -162,7 +173,7 @@ impl Git {
         };
         let text = String::from_utf8_lossy(&out);
         let lines: Vec<&str> = text.lines().collect();
-        if lines.len() < 2 {
+        if lines.len() < 3 {
             return Ok(false);
         }
         let common = PathBuf::from(lines[0]);
@@ -178,7 +189,16 @@ impl Git {
         ) else {
             return Ok(false);
         };
-        Ok(common == clone.common_dir && top == path)
+        if common != clone.common_dir || top != path {
+            return Ok(false);
+        }
+        // The git dir must be this worktree's own admin dir: its back-pointer
+        // names `<path>/.git`. The clone's own git dir has none, and another
+        // worktree's points elsewhere.
+        let back = fs::read_to_string(Path::new(lines[2]).join("gitdir"))
+            .ok()
+            .and_then(|text| fs::canonicalize(text.trim_end()).ok());
+        Ok(back.is_some_and(|b| Some(b) == fs::canonicalize(path.join(".git")).ok()))
     }
 
     /// Put `path` at `head`: reset it if it is a healthy worktree of `clone`,
