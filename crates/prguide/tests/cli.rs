@@ -58,7 +58,6 @@ fn every_command_parses_required_and_optional_arguments() {
             ],
             "guide commit",
         ),
-        (&["open", "--run", "r_x"], "open"),
         (&["show", "e_1", "--run", "r_x"], "show"),
         (
             &[

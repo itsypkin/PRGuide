@@ -1,0 +1,9 @@
+---
+source: crates/prguide/tests/open.rs
+expression: text
+---
+{
+  "opened": false,
+  "command": "prg 7",
+  "view_command": "'/opt/prguide bin/prguide' view --run '[RUN]'"
+}

@@ -1,0 +1,7 @@
+---
+source: crates/prguide/tests/open.rs
+expression: serde_json::to_string_pretty(&output.unwrap()).unwrap()
+---
+{
+  "opened": true
+}
