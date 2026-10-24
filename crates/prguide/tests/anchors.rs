@@ -307,13 +307,13 @@ code:
     );
     assert!(bad("id: a\n    kind: diff\n    path: p\n    side: left").contains("unknown variant"));
     assert!(bad("id: a\n    kind: context\n    path: p\n    start: 1").contains("missing field"));
-    assert!(
-        serde_saphyr::from_str::<Doc>(
-            "code:\n  - id: a\n    kind: diff\n    path: p\n    side: new\n    start: -1"
-        )
-        .is_err()
-    );
-    assert!(bad("id: a\n    kind: other\n    path: p\n    side: new").contains("other"));
+    let neg = serde_saphyr::from_str::<Doc>(
+        "code:\n  - id: a\n    kind: diff\n    path: p\n    side: new\n    start: -1",
+    )
+    .unwrap_err()
+    .to_string();
+    assert_eq!(neg, "PROBE");
+    assert!(bad("id: a\n    kind: other\n    path: p\n    side: new").contains("unknown variant"));
 }
 
 #[test]
