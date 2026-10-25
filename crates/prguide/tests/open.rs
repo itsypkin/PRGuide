@@ -296,6 +296,27 @@ fn env_var_overrides_the_config_file() {
 }
 
 #[test]
+fn open_command_inherits_the_environment() {
+    let (home, run) = setup_binary();
+    let temp = tempfile::tempdir().expect("temp");
+    let marker = temp.path().join("environment");
+    let output = binary(home.path(), &run, temp.path())
+        .env("REV_MARK", "inherited-42")
+        .env(
+            "PRGUIDE_OPEN_CMD",
+            format!("printf %s \"$REV_MARK\" > {}", marker.display()),
+        )
+        .output()
+        .expect("binary");
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"{\"opened\":true}\n");
+    assert_eq!(
+        fs::read_to_string(marker).expect("environment"),
+        "inherited-42"
+    );
+}
+
+#[test]
 fn empty_env_var_falls_back_to_the_config_file() {
     let (temp, clock, run) = setup();
     let marker = temp.path().join("m");
@@ -381,9 +402,13 @@ fn open_failed_keeps_only_the_stderr_tail() {
         "open_command = 'printf HEAD-MARK >&2; head -c 10000 /dev/zero | tr \\0 x >&2; printf TAIL-MARK >&2; exit 2'",
     );
     let (_, message) = error(call_default(temp.path(), clock, run, None).0);
-    assert!(message.contains("TAIL-MARK"));
-    assert!(!message.contains("HEAD-MARK"));
-    assert!(message.split(|c| c != 'x').map(str::len).max().unwrap_or(0) <= 4096);
+    let stderr = message
+        .strip_prefix("the open command failed (exit code 2): ")
+        .expect("error prefix");
+    assert_eq!(stderr.len(), 4096);
+    assert!(stderr.contains("TAIL-MARK"));
+    assert!(!stderr.contains("HEAD-MARK"));
+    assert!(stderr.split(|c| c != 'x').map(str::len).max().unwrap_or(0) <= 4096);
 }
 #[test]
 fn large_stderr_does_not_block_a_failing_command() {
@@ -410,6 +435,17 @@ fn failure_within_the_wait_is_reported() {
 }
 
 #[test]
+fn command_running_past_open_wait_is_opened() {
+    let (home, run) = setup_binary();
+    let temp = tempfile::tempdir().expect("temp");
+    let output = binary(home.path(), &run, temp.path())
+        .env("PRGUIDE_OPEN_CMD", "sleep 6; exit 4")
+        .output()
+        .expect("binary");
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"{\"opened\":true}\n");
+}
+#[test]
 fn command_still_running_after_the_wait_is_detached() {
     let (temp, clock, run) = setup();
     let pid_path = temp.path().join("pid");
@@ -424,13 +460,13 @@ fn command_still_running_after_the_wait_is_detached() {
             .expect("ok")
             .opened
     );
-    let elapsed = start.elapsed();
-    assert!(elapsed >= Duration::from_millis(4900) && elapsed < Duration::from_secs(8));
     let pid = fs::read_to_string(&pid_path)
         .expect("pid")
         .trim()
         .to_owned();
     let guard = KillOnDrop(Some(pid.clone()));
+    let elapsed = start.elapsed();
+    assert!(elapsed >= Duration::from_millis(4900) && elapsed < Duration::from_secs(8));
     assert!(alive(&pid));
     assert_eq!(pgid(&pid), pid);
     assert_ne!(pgid(&pid), pgid(&std::process::id().to_string()));
@@ -735,14 +771,28 @@ fn binary_stdout_is_only_the_json_line() {
     let error: serde_json::Value =
         serde_json::from_str(line.lines().last().expect("error line")).expect("error json");
     assert_eq!(error["code"], "open_failed");
-    assert!(
-        error["message"]
-            .as_str()
-            .expect("message")
-            .contains("ERRNOISE")
-    );
+    let message = error["message"].as_str().expect("message");
+    assert!(message.contains("ERRNOISE"));
+    assert!(!message.replace("ERRNOISE", "").contains("NOISE"));
 }
 
+#[test]
+fn child_stdout_is_not_in_open_failed_message() {
+    let (home, run) = setup_binary();
+    let temp = tempfile::tempdir().expect("temp");
+    write_config(
+        home.path(),
+        "open_command = 'echo NOISE; echo ERRNOISE >&2; exit 3'",
+    );
+    let output = binary(home.path(), &run, temp.path())
+        .output()
+        .expect("binary");
+    assert_eq!(output.status.code(), Some(1));
+    let error = error_json(&output);
+    let message = error["message"].as_str().expect("message");
+    assert!(message.contains("ERRNOISE"));
+    assert!(!message.replace("ERRNOISE", "").contains("NOISE"));
+}
 #[test]
 fn binary_child_gets_no_stdin() {
     let (home, run) = setup_binary();
@@ -779,12 +829,12 @@ fn binary_detached_child_does_not_hold_prguides_output() {
     let output = binary(home.path(), &run, temp.path())
         .output()
         .expect("binary");
+    let pid = fs::read_to_string(pid_path).expect("pid").trim().to_owned();
+    let _guard = KillOnDrop(Some(pid.clone()));
     assert!(
         start.elapsed() >= Duration::from_millis(4900) && start.elapsed() < Duration::from_secs(8)
     );
     assert_eq!(output.stdout, b"{\"opened\":true}\n");
-    let pid = fs::read_to_string(pid_path).expect("pid").trim().to_owned();
-    let _guard = KillOnDrop(Some(pid.clone()));
     assert!(alive(&pid));
 }
 #[test]
