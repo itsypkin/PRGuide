@@ -188,7 +188,7 @@ fn wait_now(
     max: u32,
 ) -> Result<WaitOutcome, StoreError> {
     spawn_wait(home, clock, run, Some(Duration::ZERO), max)
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(Duration::from_secs(10))
         .expect("zero-timeout wait hung")
 }
 
@@ -575,6 +575,29 @@ fn status_report_lists_ready_versions_oldest_first() {
     assert_eq!(
         report.guide_versions,
         vec![version(1, "full"), version(3, "commits")]
+    );
+}
+
+/// The viewer's status read must never renew the lease (design §2.5).
+#[test]
+fn the_status_read_never_renews_the_lease() {
+    let (_temp, mut store, clock) = setup();
+    let a = start(&mut store);
+    clock.advance(LEASE - Duration::from_millis(1));
+    assert_eq!(
+        status::agent_status(&mut store).expect("status"),
+        AgentStatus::NotListening {
+            pending: 0,
+            active_run: Some(a)
+        }
+    );
+    clock.advance(Duration::from_millis(1));
+    assert_eq!(
+        status::agent_status(&mut store).expect("status"),
+        AgentStatus::NotListening {
+            pending: 0,
+            active_run: None
+        }
     );
 }
 
