@@ -732,16 +732,29 @@ fn yaml_invalid_cases() {
     let cases: Vec<(String, &str)> = vec![
         (slide_text("id: s1\n kind: step\n", "x\n"), "line 3"),
         (
-            slide_text("id: s1\nkind: step\ntitle: \"abc\n", "x\n"),
-            "line",
+            slide_text("id: s1\n kind: step\n", "x\n"),
+            "it does not parse",
         ),
-        (slide_text("id: s1\n\tkind: step\n", "x\n"), "line"),
+        (
+            slide_text("id: s1\nkind: step\ntitle: \"abc\n", "x\n"),
+            "it does not parse",
+        ),
+        (
+            slide_text("id: s1\n\tkind: step\n", "x\n"),
+            "it does not parse",
+        ),
         ("---\n---\n".to_string(), "empty"),
-        (slide_text("- a\n- b\n", "x\n"), "invalid YAML"),
-        (slide_text("just text\n", "x\n"), "invalid YAML"),
+        (
+            slide_text("- a\n- b\n", "x\n"),
+            "top level must be a mapping",
+        ),
+        (
+            slide_text("just text\n", "x\n"),
+            "top level must be a mapping",
+        ),
         (
             slide_text(&format!("id: s1\nkind: step\ntitle: {nested}\n"), "x\n"),
-            "invalid YAML",
+            "too large or too deeply nested",
         ),
     ];
     for (text, needle) in &cases {
@@ -753,7 +766,7 @@ fn yaml_invalid_cases() {
         "yaml_invalid",
         "guide.yaml",
         "",
-        "invalid YAML",
+        "more than one document",
     );
 }
 
@@ -1518,7 +1531,7 @@ fn file_unreadable() {
         "file_unreadable",
         "slides/s1.md",
         "",
-        "slides/s1.md",
+        "ermission",
     );
     assert_eq!(ids(&load.slide_files), ["s1"]);
 }
@@ -1582,4 +1595,139 @@ fn block_field_builds_on_anchor_field() {
 #[test]
 fn markdown_options_are_commonmark() {
     assert_eq!(markdown_options(), pulldown_cmark::Options::empty());
+}
+
+// ------------------------------------------------- review-round additions
+
+/// R1 binary_errors_are_field_invalid: a `!!binary` value that can't be
+/// decoded, or isn't UTF-8, is a bad value for its field, not bad YAML.
+#[test]
+fn binary_errors_are_field_invalid() {
+    for value in ["!!binary \"!!!\"", "!!binary /w=="] {
+        let text = slide_text(&format!("id: s1\nkind: step\ntitle: {value}\n"), "x\n");
+        assert_err(
+            &s1_err(&text),
+            "field_invalid",
+            "slides/s1.md",
+            "title",
+            "invalid value for `title`",
+        );
+    }
+}
+
+/// R2 tagged_scalar_is_field_invalid: `!!int 5` can't be read as a string.
+#[test]
+fn tagged_scalar_is_field_invalid() {
+    let text = slide_text("id: s1\nkind: step\ntitle: !!int 5\n", "x\n");
+    assert_err(
+        &s1_err(&text),
+        "field_invalid",
+        "slides/s1.md",
+        "title",
+        "cannot be read as a string",
+    );
+}
+
+/// R3 type_error_keeps_its_path_over_later_duplicate: a null title comes
+/// before a duplicate key inside code[0]; the first problem is reported, with
+/// its own path, not the duplicate with a path-less field.
+#[test]
+fn type_error_keeps_its_path_over_later_duplicate() {
+    let text = slide_text(
+        "id: s1\nkind: step\ntitle: ~\ncode:\n  - id: c\n    kind: diff\n    path: p\n    side: new\n    side: old\n",
+        "x\n",
+    );
+    assert_err(
+        &s1_err(&text),
+        "field_invalid",
+        "slides/s1.md",
+        "title",
+        "null is not allowed",
+    );
+}
+
+/// R4 diff_block_null_start_is_valid: `start: ~` is valid on a diff block, so
+/// the bad key is `end`.
+#[test]
+fn diff_block_null_start_is_valid() {
+    let text = with_code(
+        "  - id: c\n    kind: diff\n    path: p\n    side: new\n    start: ~\n    end: abc\n",
+    );
+    assert_err(
+        &s1_err(&text),
+        "field_invalid",
+        "slides/s1.md",
+        &block_field(0, "end"),
+        "invalid value for `end`",
+    );
+    // On a context block `start: ~` is itself the bad key.
+    let text = with_code(&ctx_block("    start: ~\n    end: abc\n"));
+    assert_err(
+        &s1_err(&text),
+        "field_invalid",
+        "slides/s1.md",
+        &block_field(0, "start"),
+        "invalid value for `start`",
+    );
+}
+
+/// R5 code_element_not_a_mapping: no key can be blamed, so the whole element
+/// is the field.
+#[test]
+fn code_element_not_a_mapping() {
+    let text = slide_text(&format!("{FRONT}code:\n  - x\n"), "x\n");
+    assert_err(
+        &s1_err(&text),
+        "field_invalid",
+        "slides/s1.md",
+        "code[0]",
+        "invalid value for `code`",
+    );
+}
+
+/// R6 list_before_fence_does_not_nest: after a list closes, a top-level
+/// mermaid fence is accepted.
+#[test]
+fn list_before_fence_does_not_nest() {
+    // body_line is 6; the fence opens on body line 3.
+    let slide = arch("- a\n\n```mermaid\nx\n```\n").unwrap();
+    assert_eq!(slide.mermaid.unwrap().line, 8);
+    let slide = arch("> q\n\n```text\nx\n```\n").unwrap();
+    assert_eq!(slide.text_art.unwrap().line, 8);
+}
+
+/// R7 unreadable_directories: a slides/ or a draft root that can't be listed
+/// is file_unreadable, not a silent empty draft.
+#[test]
+fn unreadable_directories() {
+    let dir = draft(&[
+        ("guide.yaml", &valid_manifest()),
+        ("slides/s1.md", OVERVIEW_SLIDE),
+    ]);
+    let slides = dir.path().join("slides");
+    fs::set_permissions(&slides, fs::Permissions::from_mode(0o000)).unwrap();
+    let listable = fs::read_dir(&slides).is_ok();
+    let load = load_draft(dir.path());
+    fs::set_permissions(&slides, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!listable, "run the tests as a non-root user");
+    assert_eq!(load.errors.len(), 1, "{:?}", load.errors);
+    assert_err(
+        &load.errors[0],
+        "file_unreadable",
+        "slides",
+        "",
+        "ermission",
+    );
+    assert!(load.manifest.is_some());
+    assert!(load.slide_files.is_empty());
+
+    let root = draft(&[("guide.yaml", &valid_manifest())]);
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o000)).unwrap();
+    let listable = fs::read_dir(root.path()).is_ok();
+    let load = load_draft(root.path());
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!listable, "run the tests as a non-root user");
+    assert_eq!(load.errors.len(), 1, "{:?}", load.errors);
+    assert_err(&load.errors[0], "file_unreadable", "", "", "ermission");
+    assert!(load.manifest.is_none());
 }

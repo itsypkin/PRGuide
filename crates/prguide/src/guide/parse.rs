@@ -486,9 +486,12 @@ fn failing_block_key(text: &str, index: usize) -> Option<&'static str> {
     let block = probe.code?.into_iter().nth(index)?;
     let one_of = |key: &str, set: &[&str]| matches!(block.get(key), Some(Value::String(s)) if set.contains(&s.as_str()));
     let string = |key: &str| matches!(block.get(key), Some(Value::String(_)));
+    // A diff block's `start` and `end` are optional, so `~` is valid there.
+    let is_diff = matches!(block.get("kind"), Some(Value::String(s)) if s == "diff");
     let number = |key: &str| {
-        matches!(block.get(key), Some(Value::Number(n))
-            if n.as_u64().is_some_and(|n| n <= u64::from(u32::MAX)))
+        matches!(block.get(key), Some(Value::Null) if is_diff)
+            || matches!(block.get(key), Some(Value::Number(n))
+                if n.as_u64().is_some_and(|n| n <= u64::from(u32::MAX)))
     };
     let checks: [(&'static str, bool); 7] = [
         ("kind", one_of("kind", &["diff", "context"])),
@@ -583,11 +586,21 @@ fn yaml_error(
                 // A type error is only worth reporting when the YAML is sound
                 // as a whole: a syntax error, budget breach or forbidden
                 // feature further on takes precedence.
+                // Only a YAML fault or a forbidden feature takes over. Any
+                // other error from this path-less pass (a binary decoding
+                // error, a duplicate key) would lose the field path.
                 if let Err(whole) = serde_saphyr::from_str_with_options::<serde::de::IgnoredAny>(
                     text,
                     strict_options(),
-                ) {
-                    return yaml_error(file, line_offset, text, &[], &whole);
+                ) && invalid_detail(&whole).is_none()
+                {
+                    let reported = yaml_error(file, line_offset, text, &[], &whole);
+                    if matches!(
+                        reported,
+                        GuideError::YamlInvalid { .. } | GuideError::YamlFeatureNotAllowed { .. }
+                    ) {
+                        return reported;
+                    }
                 }
                 let (mut field, mut key) = (path, last_key(trail));
                 if let [Seg::Key("code"), Seg::Index(index)] = trail
