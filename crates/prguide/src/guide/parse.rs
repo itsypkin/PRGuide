@@ -580,6 +580,15 @@ fn yaml_error(
         }
         _ => match invalid_detail(error) {
             Some(detail) if !trail.is_empty() => {
+                // A type error is only worth reporting when the YAML is sound
+                // as a whole: a syntax error, budget breach or forbidden
+                // feature further on takes precedence.
+                if let Err(whole) = serde_saphyr::from_str_with_options::<serde::de::IgnoredAny>(
+                    text,
+                    strict_options(),
+                ) {
+                    return yaml_error(file, line_offset, text, &[], &whole);
+                }
                 let (mut field, mut key) = (path, last_key(trail));
                 if let [Seg::Key("code"), Seg::Index(index)] = trail
                     && let Some(block_key) = failing_block_key(text, *index)

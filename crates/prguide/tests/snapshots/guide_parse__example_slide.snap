@@ -1,0 +1,43 @@
+---
+source: crates/prguide/tests/guide_parse.rs
+expression: "serde_json::to_string_pretty(&slide).unwrap()"
+---
+{
+  "file": "slides/s2-controller.md",
+  "front": {
+    "id": "s2-controller",
+    "kind": "step",
+    "title": "Controller: accept the new `retry` flag",
+    "code": [
+      {
+        "kind": "diff",
+        "id": "handler",
+        "path": "src/api/orders.rs",
+        "side": "new",
+        "start": 40,
+        "end": 88
+      },
+      {
+        "kind": "context",
+        "id": "router",
+        "path": "src/router.rs",
+        "at": "snapshot-head",
+        "start": 12,
+        "end": 20
+      }
+    ],
+    "flags": [
+      {
+        "at": {
+          "block": "handler",
+          "line": 61
+        },
+        "text": "No test covers retry=false."
+      }
+    ]
+  },
+  "body": "The request reaches `OrdersController::create` from the router above.\n",
+  "body_line": 22,
+  "mermaid": null,
+  "text_art": null
+}
