@@ -1849,6 +1849,16 @@ fn diagram_cut_cannot_create_html() {
     let err = arch(body).unwrap_err();
     assert_err(&err, "html_not_allowed", "slides/s1.md", "body", "raw HTML");
     assert!(err.to_string().contains("line 13"), "{err}");
+    // Inline HTML formed by a cut is rejected too (not only block HTML).
+    let body = "- item\n```mermaid\nA\n```\n    a <img src=x onerror=alert(1)> b\n";
+    let err = arch(body).unwrap_err();
+    assert_err(&err, "html_not_allowed", "slides/s1.md", "body", "raw HTML");
+    assert!(err.to_string().contains("line 10"), "{err}");
+    // HTML between two cuts: a cut that lies after it must not shift its line.
+    let body = "- item\n```mermaid\nA\n```\n    <div>x</div>\n\n```text\nB\n```\n";
+    let err = arch(body).unwrap_err();
+    assert_err(&err, "html_not_allowed", "slides/s1.md", "body", "raw HTML");
+    assert!(err.to_string().contains("line 10"), "{err}");
     // After a paragraph the same text is indented code and stays Ok.
     let body = "p\n```mermaid\nA\n```\n    <div>x</div>\n";
     let slide = arch(body).unwrap();
