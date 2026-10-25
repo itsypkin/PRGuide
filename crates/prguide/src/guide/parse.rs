@@ -466,7 +466,9 @@ fn yaml_phrase(error: &YamlError) -> &'static str {
         } => "invalid YAML: more than one document",
         YamlError::IndentationError { .. } => "invalid YAML: bad indentation",
         YamlError::Budget { .. } => "invalid YAML: too large or too deeply nested",
-        _ if invalid_detail(error).is_some() => "invalid YAML: the top level must be a mapping",
+        _ if invalid_detail(error).is_some() => {
+            "invalid YAML: the top level must be a mapping with plain string keys"
+        }
         _ => "invalid YAML: it does not parse",
     }
 }
@@ -583,12 +585,12 @@ fn yaml_error(
         }
         _ => match invalid_detail(error) {
             Some(detail) if !trail.is_empty() => {
-                // A type error is only worth reporting when the YAML is sound
-                // as a whole: a syntax error, budget breach or forbidden
-                // feature further on takes precedence.
-                // Only a YAML fault or a forbidden feature takes over. Any
-                // other error from this path-less pass (a binary decoding
-                // error, a duplicate key) would lose the field path.
+                // A syntax error, budget breach or forbidden feature that this
+                // path-less pass meets before any other value error takes
+                // over. Any other error from it (a binary decoding error, a
+                // duplicate key) would lose the field path, so it is ignored
+                // and the original error is reported. A syntax error that
+                // sits behind such a value error shows up once that is fixed.
                 if let Err(whole) = serde_saphyr::from_str_with_options::<serde::de::IgnoredAny>(
                     text,
                     strict_options(),

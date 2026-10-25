@@ -752,6 +752,11 @@ fn yaml_invalid_cases() {
             slide_text("just text\n", "x\n"),
             "top level must be a mapping",
         ),
+        // The root is a mapping, but its key is not a plain string.
+        (
+            slide_text("id: s1\nkind: step\ntitle: T\n? [a]\n: 1\n", "x\n"),
+            "with plain string keys",
+        ),
         (
             slide_text(&format!("id: s1\nkind: step\ntitle: {nested}\n"), "x\n"),
             "too large or too deeply nested",
