@@ -276,17 +276,14 @@ fn env_var_overrides_the_config_file() {
     assert!(out.join("from-env").exists());
     assert!(!out.join("from-config").exists());
     write_config(temp.path(), "open_command = ");
-    assert!(
-        call_default(
-            temp.path(),
-            clock.clone(),
-            run.clone(),
-            Some(OsString::from(format!("touch {}/b", out.display())))
-        )
-        .0
-        .expect("override invalid")
-        .opened
+    let invalid_override = call_default(
+        temp.path(),
+        clock.clone(),
+        run.clone(),
+        Some(OsString::from(format!("touch {}/b", out.display()))),
     );
+    assert!(invalid_override.0.expect("override invalid").opened);
+    assert!(invalid_override.1.is_empty());
     assert!(out.join("b").exists());
     fs::remove_file(temp.path().join("config.toml")).expect("remove");
     fs::create_dir(temp.path().join("config.toml")).expect("directory");
@@ -620,6 +617,17 @@ fn binary_config_follows_prguide_home() {
         .expect("binary");
     assert!(output.status.success());
     assert!(out.join("u").exists());
+    fs::remove_file(out.join("u")).expect("remove");
+    let output = Command::new(env!("CARGO_BIN_EXE_prguide"))
+        .args(["open", "--run", run.id.as_str()])
+        .env("PRGUIDE_HOME", "")
+        .env_remove("PRGUIDE_OPEN_CMD")
+        .env("HOME", &user)
+        .current_dir(temp.path())
+        .output()
+        .expect("binary");
+    assert!(output.status.success());
+    assert!(out.join("u").exists() && !out.join("h").exists());
     let output = binary(&home, &run.id, temp.path())
         .env("PRGUIDE_HOME", "rel/dir")
         .output()
@@ -679,8 +687,23 @@ fn binary_view_command_survives_a_hostile_binary_path() {
         .expect("binary");
     assert!(output.status.success());
     assert_eq!(output_json(&output)["view_command"], expected);
-    let original = Path::new(env!("CARGO_BIN_EXE_prguide"));
-    assert!(original.is_absolute() && original.is_file());
+    let uncopied_out = root.join("uncopied-out");
+    fs::create_dir(&uncopied_out).expect("uncopied out");
+    let uncopied_script = format!(
+        "printf '%s' \"$PRGUIDE_VIEW_CMD\" > \"{0}/view\"; eval \"set -- $PRGUIDE_VIEW_CMD\"; i=0; for a in \"$@\"; do i=$((i+1)); printf '%s' \"$a\" > \"{0}/arg$i\"; done",
+        uncopied_out.display()
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_prguide"))
+        .args(["open", "--run", run.as_str()])
+        .env("PRGUIDE_HOME", home.path())
+        .env("HOME", &root)
+        .env("PRGUIDE_OPEN_CMD", uncopied_script)
+        .current_dir(&root)
+        .output()
+        .expect("uncopied binary");
+    assert!(output.status.success());
+    let original_arg1 = fs::read_to_string(uncopied_out.join("arg1")).expect("uncopied arg1");
+    assert!(Path::new(&original_arg1).is_absolute() && Path::new(&original_arg1).is_file());
 }
 
 #[test]
@@ -709,8 +732,17 @@ fn binary_stdout_is_only_the_json_line() {
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     let line = String::from_utf8(output.stderr).expect("stderr");
-    assert!(line.contains("open_failed") && line.contains("ERRNOISE") && !line.contains("NOISE\n"));
+    let error: serde_json::Value =
+        serde_json::from_str(line.lines().last().expect("error line")).expect("error json");
+    assert_eq!(error["code"], "open_failed");
+    assert!(
+        error["message"]
+            .as_str()
+            .expect("message")
+            .contains("ERRNOISE")
+    );
 }
+
 #[test]
 fn binary_child_gets_no_stdin() {
     let (home, run) = setup_binary();
@@ -764,7 +796,7 @@ fn binary_detached_child_keeps_writing_after_prguide_exits() {
     write_config(
         home.path(),
         &command_value(format!(
-            "echo $$ > {0}; i=0; while [ $i -lt 300 ]; do i=$((i+1)); echo line >&2; echo $i > {1}; sleep 0.05; done",
+            "echo $$ > {0}; i=0; while [ $i -lt 300 ]; do i=$((i+1)); echo \"line $i\" >&2; echo $i > {1}; sleep 0.05; done",
             pid_path.display(),
             count.display()
         )),
