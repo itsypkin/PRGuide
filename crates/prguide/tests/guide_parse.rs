@@ -1808,7 +1808,7 @@ fn unreadable_directories() {
 
 // --------------------------------------------- review-round 2 additions
 
-/// R4 symlink_root_with_trailing_slash_is_rejected: `link/`, `link/.` and
+/// R8 symlink_root_with_trailing_slash_is_rejected: `link/`, `link/.` and
 /// `link//` are followed by the OS, so they must not hide a symlinked root.
 #[test]
 fn symlink_root_with_trailing_slash_is_rejected() {
@@ -1831,7 +1831,7 @@ fn symlink_root_with_trailing_slash_is_rejected() {
     assert!(load.errors.is_empty(), "{:?}", load.errors);
 }
 
-/// R5 diagram_cut_cannot_create_html: cutting a block must not leave indented
+/// R9 diagram_cut_cannot_create_html: cutting a block must not leave indented
 /// code behind that now reads as raw HTML.
 #[test]
 fn diagram_cut_cannot_create_html() {
@@ -1850,7 +1850,7 @@ fn diagram_cut_cannot_create_html() {
     assert!(slide.body.contains("    <div>x</div>"));
 }
 
-/// R6 fifo_guide_yaml_not_opened: a FIFO named guide.yaml is unexpected, is
+/// R10 fifo_guide_yaml_not_opened: a FIFO named guide.yaml is unexpected, is
 /// never opened, and doesn't also count as a missing manifest.
 #[test]
 fn fifo_guide_yaml_not_opened() {
