@@ -1843,6 +1843,12 @@ fn diagram_cut_cannot_create_html() {
         assert_err(&err, "html_not_allowed", "slides/s1.md", "body", "raw HTML");
         assert!(err.to_string().contains("line 10"), "{err}");
     }
+    // Two cuts before the `<div>`: both removed lengths count in the file line.
+    // Body lines: 1 fence, 2-3, 4 `- item`, 5 fence, 6-7, 8 `<div>` -> file line 13.
+    let body = "```mermaid\nA\n```\n- item\n```text\nB\n```\n    <div>x</div>\n";
+    let err = arch(body).unwrap_err();
+    assert_err(&err, "html_not_allowed", "slides/s1.md", "body", "raw HTML");
+    assert!(err.to_string().contains("line 13"), "{err}");
     // After a paragraph the same text is indented code and stays Ok.
     let body = "p\n```mermaid\nA\n```\n    <div>x</div>\n";
     let slide = arch(body).unwrap();
