@@ -1,0 +1,5 @@
+---
+source: crates/prguide/tests/status.rs
+expression: "redacted_stdout(&output, &run)"
+---
+{"run":{"id":"[RUN]","state":"active","created_at":"[TIME]","lease_until":"[TIME]","ended_at":null,"end_reason":null},"guide_versions":[],"status":"working","pending":2}
