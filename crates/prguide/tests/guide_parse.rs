@@ -286,6 +286,17 @@ fn manifest_invalid_value() {
         "pr.number",
         "invalid value for `number`",
     );
+    // The manifest's lines are file lines as they stand (no offset).
+    let text = valid_manifest().replace("number: 1234", "number: x");
+    let err = manifest_err(&text);
+    assert_err(
+        &err,
+        "field_invalid",
+        "guide.yaml",
+        "pr.number",
+        "invalid value for `number`",
+    );
+    assert!(err.to_string().contains("(line 2)"), "{err}");
 }
 
 // ------------------------------------------------------------ front matter
@@ -482,6 +493,36 @@ fn code_block_invalid_start_or_end() {
             &format!("invalid value for `{key}`"),
         );
     }
+    // Out of the u32 range.
+    assert_err(
+        &s1_err(&with_code(&ctx_block(
+            "    start: 4294967296\n    end: 2\n",
+        ))),
+        "field_invalid",
+        "slides/s1.md",
+        &block_field(0, "start"),
+        "invalid value for `start`",
+    );
+    // A bad key in a block after the first: the index picks the right block.
+    let valid_first = ctx_block("    start: 1\n    end: 2\n");
+    let second_bad =
+        "  - id: d\n    kind: context\n    path: src/b.rs\n    start: abc\n    end: 2\n";
+    assert_err(
+        &s1_err(&with_code(&format!("{valid_first}{second_bad}"))),
+        "field_invalid",
+        "slides/s1.md",
+        &block_field(1, "start"),
+        "invalid value for `start`",
+    );
+    let second_side =
+        "  - id: d\n    kind: diff\n    path: src/b.rs\n    side: left\n    start: 1\n    end: 2\n";
+    assert_err(
+        &s1_err(&with_code(&format!("{valid_first}{second_side}"))),
+        "field_invalid",
+        "slides/s1.md",
+        &block_field(1, "side"),
+        "invalid value for `side`",
+    );
     let text =
         with_code("  - id: [x]\n    kind: context\n    path: [y]\n    start: 1\n    end: 2\n");
     assert_err(
@@ -788,6 +829,8 @@ fn front_matter_delimiters_accepted() {
         ("---\nid: s1\nkind: step\ntitle: T\n---".to_string(), ""),
         (slide_text(FRONT, "a\n\n---\n\nb\n"), "a\n\n---\n\nb\n"),
         (slide_text(FRONT, "```\n---\n```\n"), "```\n---\n```\n"),
+        // A lone "\r" is not a line end to normalise: it stays.
+        (slide_text(FRONT, "a\rb\n"), "a\rb\n"),
     ];
     for (text, body) in &cases {
         let slide = parse_s1(text).unwrap_or_else(|e| panic!("{text:?}: {e}"));
@@ -1024,6 +1067,9 @@ fn diagram_info_string_rules() {
         let slide = arch(body).unwrap();
         assert_eq!(slide.mermaid.unwrap().source, "x\n", "{body:?}");
     }
+    // A fence indented by one to three spaces is still a top-level fence.
+    let slide = arch("  ```mermaid\n  a\n  b\n  ```\n").unwrap();
+    assert_eq!(slide.mermaid.unwrap().source, "a\nb\n");
     for body in [
         "```Mermaid\nx\n```\n",
         "```{.mermaid}\nx\n```\n",
@@ -1085,7 +1131,7 @@ fn unclosed_mermaid_fence() {
 #[test]
 fn code_path_rules() {
     // (YAML double-quoted form, the path it decodes to, B.6's reason)
-    let rejected: [(&str, &str, &str); 15] = [
+    let rejected: [(&str, &str, &str); 17] = [
         ("\"\"", "", "empty path"),
         ("\"a\\0b\"", "a\u{0}b", "control character"),
         ("\"a\\nb\"", "a\nb", "control character"),
@@ -1094,6 +1140,8 @@ fn code_path_rules() {
         ("\"/abs\"", "/abs", "absolute"),
         ("\"C:/x\"", "C:/x", "drive prefix"),
         ("\"c:x\"", "c:x", "drive prefix"),
+        ("\"c:\"", "c:", "drive prefix"),
+        ("\"a\\x1Fb\"", "a\u{1f}b", "control character"),
         ("\"a//b\"", "a//b", "empty segment"),
         ("\"a/\"", "a/", "empty segment"),
         ("\".\"", ".", "`.` segment"),
@@ -1160,6 +1208,27 @@ fn valid_draft_loads() {
     assert_eq!(ids(&load.slide_files), ["s1-overview", "s2-controller"]);
     let parsed: Vec<&str> = load.slides.iter().map(|s| s.front.id.as_str()).collect();
     assert_eq!(parsed, ["s1-overview", "s2-controller"]);
+
+    // Nine slides written in reverse order still load sorted by id.
+    let names: Vec<String> = (1..=9).rev().map(|n| format!("s{n}")).collect();
+    let texts: Vec<String> = names
+        .iter()
+        .map(|n| slide_text(&format!("id: {n}\nkind: step\ntitle: T\n"), "x\n"))
+        .collect();
+    let files: Vec<(String, &str)> = names
+        .iter()
+        .zip(&texts)
+        .map(|(n, t)| (format!("slides/{n}.md"), t.as_str()))
+        .collect();
+    let manifest = valid_manifest();
+    let mut refs: Vec<(&str, &str)> = vec![("guide.yaml", manifest.as_str())];
+    refs.extend(files.iter().map(|(n, t)| (n.as_str(), *t)));
+    let load = load_draft(draft(&refs).path());
+    assert!(load.errors.is_empty(), "{:?}", load.errors);
+    let want = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9"];
+    assert_eq!(ids(&load.slide_files), want);
+    let parsed: Vec<&str> = load.slides.iter().map(|s| s.front.id.as_str()).collect();
+    assert_eq!(parsed, want);
 }
 
 /// P47 draft_root_symlink
@@ -1735,4 +1804,65 @@ fn unreadable_directories() {
     assert_eq!(load.errors.len(), 1, "{:?}", load.errors);
     assert_err(&load.errors[0], "file_unreadable", "", "", "ermission");
     assert!(load.manifest.is_none());
+}
+
+// --------------------------------------------- review-round 2 additions
+
+/// R4 symlink_root_with_trailing_slash_is_rejected: `link/`, `link/.` and
+/// `link//` are followed by the OS, so they must not hide a symlinked root.
+#[test]
+fn symlink_root_with_trailing_slash_is_rejected() {
+    let real = draft(&[
+        ("guide.yaml", &valid_manifest()),
+        ("slides/s1-overview.md", OVERVIEW_SLIDE),
+    ]);
+    let tmp = tempfile::tempdir().unwrap();
+    let link = tmp.path().join("link");
+    symlink(real.path(), &link).unwrap();
+    let base = link.to_str().unwrap();
+    for path in [format!("{base}/"), format!("{base}/."), format!("{base}//")] {
+        let load = load_draft(Path::new(&path));
+        assert_eq!(load.errors.len(), 1, "{path}: {:?}", load.errors);
+        assert_err(&load.errors[0], "symlink_not_allowed", "", "", "symlink");
+        assert!(load.manifest.is_none() && load.slides.is_empty() && load.slide_files.is_empty());
+    }
+    // A real draft with a trailing slash still loads.
+    let load = load_draft(Path::new(&format!("{}/", real.path().display())));
+    assert!(load.errors.is_empty(), "{:?}", load.errors);
+}
+
+/// R5 diagram_cut_cannot_create_html: cutting a block must not leave indented
+/// code behind that now reads as raw HTML.
+#[test]
+fn diagram_cut_cannot_create_html() {
+    // Front matter is 5 lines, so the body starts on file line 6 and
+    // `<div>` is on body line 5, file line 10.
+    for fence in ["```mermaid\nA\n```\n", "```text\nA\n```\n"] {
+        let body = format!("- item\n{fence}    <div>x</div>\n");
+        let err = arch(&body).unwrap_err();
+        assert_err(&err, "html_not_allowed", "slides/s1.md", "body", "raw HTML");
+        assert!(err.to_string().contains("line 10"), "{err}");
+    }
+    // After a paragraph the same text is indented code and stays Ok.
+    let body = "p\n```mermaid\nA\n```\n    <div>x</div>\n";
+    let slide = arch(body).unwrap();
+    assert_eq!(slide.mermaid.unwrap().source, "A\n");
+    assert!(slide.body.contains("    <div>x</div>"));
+}
+
+/// R6 fifo_guide_yaml_not_opened: a FIFO named guide.yaml is unexpected, is
+/// never opened, and doesn't also count as a missing manifest.
+#[test]
+fn fifo_guide_yaml_not_opened() {
+    let dir = tempfile::tempdir().unwrap();
+    let status = Command::new("mkfifo")
+        .arg(dir.path().join("guide.yaml"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let load = load_draft(dir.path());
+    assert_eq!(
+        summary(&load.errors),
+        expect(&[("unexpected_file", "guide.yaml", "")])
+    );
 }

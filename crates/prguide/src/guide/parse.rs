@@ -813,6 +813,15 @@ pub fn parse_slide(file: &str, text: &str) -> Result<Slide, GuideError> {
     })
 }
 
+fn html_error(file: &str, line: u32) -> GuideError {
+    ge!(
+        HtmlNotAllowed,
+        file,
+        "body",
+        format!("raw HTML is not allowed in a slide body (line {line}); use Markdown")
+    )
+}
+
 /// Check a slide body (no raw HTML) and, on an architecture slide, pull its
 /// diagram blocks out. `body_line` is the file line the body starts on.
 pub fn check_body(
@@ -831,15 +840,7 @@ pub fn check_body(
 
     for (event, range) in &events {
         if matches!(event, Event::Html(_) | Event::InlineHtml(_)) {
-            return Err(ge!(
-                HtmlNotAllowed,
-                file,
-                "body",
-                format!(
-                    "raw HTML is not allowed in a slide body (line {}); use Markdown",
-                    line_of(range.start)
-                )
-            ));
+            return Err(html_error(file, line_of(range.start)));
         }
     }
     if kind != SlideKind::Architecture {
@@ -906,8 +907,28 @@ pub fn check_body(
     }
 
     let mut out = body.to_string();
-    for range in cuts.into_iter().rev() {
-        out.replace_range(range, "");
+    for range in cuts.iter().rev() {
+        out.replace_range(range.clone(), "");
+    }
+    // Cutting a block can join what was around it into raw HTML (an indented
+    // code block after a list item turns into an HTML block, say). The body
+    // the model returns must be free of HTML too, so run the rule again.
+    if !cuts.is_empty() {
+        for (event, range) in Parser::new_ext(&out, markdown_options()).into_offset_iter() {
+            if matches!(event, Event::Html(_) | Event::InlineHtml(_)) {
+                // Map the offset in the cut body back to the original body by
+                // adding back every cut that lies before it.
+                let mut original = range.start;
+                let mut removed = 0;
+                for cut in &cuts {
+                    if range.start >= cut.start - removed {
+                        removed += cut.end - cut.start;
+                        original = range.start + removed;
+                    }
+                }
+                return Err(html_error(file, line_of(original)));
+            }
+        }
     }
     Ok((out, mermaid, text_art))
 }
@@ -960,6 +981,9 @@ fn read_utf8(path: &Path, file: &str) -> Result<String, GuideError> {
 /// ancestors of `dir` are not checked. At most one error per file, sorted by
 /// file.
 pub fn load_draft(dir: &Path) -> DraftLoad {
+    // `lstat("link/")` follows the link, so drop a trailing `/` or `/.` first.
+    let dir: PathBuf = dir.components().collect();
+    let dir = dir.as_path();
     let mut load = DraftLoad {
         manifest: None,
         slide_files: Vec::new(),
