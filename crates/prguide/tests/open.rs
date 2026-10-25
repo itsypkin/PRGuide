@@ -1,6 +1,7 @@
 use std::{
     ffi::OsString,
     fs,
+    io::Write,
     os::unix::process::{CommandExt, ExitStatusExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -720,10 +721,17 @@ fn binary_child_gets_no_stdin() {
         &command_value(format!("cat > {}; exit 0", file.display())),
     );
     let start = Instant::now();
-    let output = binary(home.path(), &run, temp.path())
-        .output()
+    let mut child = binary(home.path(), &run, temp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
         .expect("binary");
-    assert!(output.status.success() && start.elapsed() < Duration::from_secs(4));
+    let mut stdin = child.stdin.take().expect("stdin");
+    stdin.write_all(b"LEAK\n").expect("write");
+    assert!(child.wait().expect("wait").success());
+    assert!(start.elapsed() < Duration::from_secs(4));
+    drop(stdin);
     assert!(fs::read(file).expect("stdin").is_empty());
 }
 #[test]
