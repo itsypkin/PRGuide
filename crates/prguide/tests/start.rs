@@ -2151,12 +2151,27 @@ fn nfd_named_file_and_directory_survive_start_and_resume() {
             b"in dir\n"
         );
     };
+    // (inode, mtime in ns) of both paths: a reset that deleted and recreated
+    // them would change these.
+    let ident = |out: &StartOutput| {
+        use std::os::unix::fs::MetadataExt;
+        [NFD, "re\u{301}sume\u{301}/a.md"].map(|p| {
+            let m = fs::metadata(out.worktree.join(p)).unwrap();
+            (m.ino(), m.mtime(), m.mtime_nsec())
+        })
+    };
     let out = ctx.ok();
     check(&ctx, &out, &ctx.head);
+    let before = ident(&out);
+    ctx.stop(&out);
+    let out = ctx.ok();
+    check(&ctx, &out, &ctx.head);
+    assert_eq!(ident(&out), before, "resume on the same head");
     ctx.stop(&out);
     let head = ctx.advance_index(&[("z.txt", "z\n")], &[]);
     let out = ctx.ok();
     check(&ctx, &out, &head);
+    assert_eq!(ident(&out), before, "resume to a new head");
 }
 
 #[cfg(target_os = "linux")]
