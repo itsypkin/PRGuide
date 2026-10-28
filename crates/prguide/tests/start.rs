@@ -2119,6 +2119,13 @@ fn collision_warnings_ignore_case_and_unicode_config() {
                 b"lone\n",
                 "{scope} {label}"
             );
+            for (path, bytes) in [("Docs/a.md", b"a\n"), ("docs/b.md", b"b\n")] {
+                assert_eq!(
+                    fs::read(out.worktree.join(path)).unwrap(),
+                    bytes,
+                    "{scope} {label} {path}"
+                );
+            }
         }
     }
 }

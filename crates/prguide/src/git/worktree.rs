@@ -291,7 +291,7 @@ impl Git {
         .map(|_| ())
     }
 
-    /// In an existing worktree: checkout --detach --force <head>, then clean -ffdx.
+    /// In an existing worktree: checkout --detach --force <head>, clean -ffdx, then checkout again.
     /// Trusts `<path>/.git`: callers must go through `prepare_worktree`, which
     /// checks the worktree first.
     pub fn reset_worktree(&self, path: &Path, head: &str) -> Result<(), GitError> {
