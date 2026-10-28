@@ -1846,3 +1846,179 @@ fn missing_parent_is_draft_unknown() {
     let err = ctx.check_path(&tmp.path().join("nope/x")).unwrap_err();
     assert_eq!(err.code(), "draft_unknown");
 }
+
+// ---------------------------------------------------------------- review round 1
+
+/// X6 unlisted_slide_blocks_are_resolved: a block that does not resolve on an
+/// unlisted slide still fails the check.
+#[test]
+fn unlisted_slide_blocks_are_resolved() {
+    let ctx = Ctx::new();
+    ctx.valid();
+    let far = "{ id: far, kind: context, path: ctx.txt, start: 40, end: 45 }";
+    ctx.put("extra", &step("extra", &[far], &[]));
+    let report = ctx.chk();
+    assert!(!report.ok);
+    assert_eq!(
+        report.diagnostics,
+        vec![
+            unlisted("extra"),
+            ctx.anchor("slides/extra.md", 0, &cblk("far", "ctx.txt", 40, 45))
+        ]
+    );
+}
+
+/// X7 provenance_bytes_only_difference: the row differs from guide.yaml's
+/// provenance in bytes only, so no leaf differs and the field is empty.
+#[test]
+fn provenance_bytes_only_difference() {
+    let ctx = Ctx::new();
+    ctx.valid();
+    ctx.set_row(|j| format!("{j} "));
+    assert_eq!(
+        ctx.diags(),
+        vec![e("guide.yaml", "", "provenance_changed", &prov_msg(""))]
+    );
+}
+
+/// X8 unindexed_field_sorts_before_indexed: `slides` sorts before `slides[0]`.
+#[test]
+fn unindexed_field_sorts_before_indexed() {
+    let ctx = Ctx::new();
+    ctx.valid();
+    ctx.set_slides(&["step-one", "overview"]);
+    assert_eq!(
+        ctx.diags(),
+        vec![
+            w(
+                "guide.yaml",
+                "slides",
+                "no_architecture",
+                "the deck has no architecture slide"
+            ),
+            e(
+                "guide.yaml",
+                "slides[0]",
+                "overview_first",
+                "the first slide must be the overview; `step-one` has kind step"
+            ),
+            unlisted("arch"),
+        ]
+    );
+}
+
+/// X9 duplicate_block_is_still_resolved: a repeated block id is flagged and
+/// the repeat is resolved too.
+#[test]
+fn duplicate_block_is_still_resolved() {
+    let ctx = Ctx::new();
+    let again = "{ id: handler, kind: diff, path: missing.txt, side: new, start: 1, end: 1 }";
+    ctx.with_step(&[HANDLER, CTXB, again], &[FLAG5]);
+    let f = "slides/step-one.md";
+    assert_eq!(
+        ctx.diags(),
+        vec![
+            dup_block(f, 2, "handler", 0),
+            ctx.anchor(f, 2, &dblk("handler", "missing.txt", 1, 1)),
+        ]
+    );
+}
+
+/// X10 unknown_draft_beats_not_in_clone: from a directory outside any clone,
+/// an unknown draft is reported as draft_unknown, not not_in_clone.
+#[test]
+fn unknown_draft_beats_not_in_clone() {
+    let ctx = Ctx::live();
+    ctx.valid();
+    let tmp = TempDir::new().unwrap();
+    let out = ctx.bin(tmp.path(), &tmp.path().join("nope"), &ctx.run);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert_eq!(stderr_json(&out)["code"], "draft_unknown");
+}
+
+/// X11 no_code_means_no_git: with no code block anywhere, unreadable heads
+/// are never touched.
+#[test]
+fn no_code_means_no_git() {
+    let ctx = Ctx::new();
+    ctx.valid();
+    ctx.put("step-one", &step("step-one", &[], &[]));
+    let zeros = "0".repeat(40);
+    let head = ctx.out.snapshot.head.clone();
+    ctx.set_row(|j| j.replace(&head, &zeros));
+    ctx.set_yaml(&ctx.yaml().replace(&head, &zeros));
+    assert_eq!(
+        ctx.check_path(&ctx.draft).unwrap(),
+        CheckReport {
+            ok: true,
+            diagnostics: vec![]
+        }
+    );
+}
+
+/// X12 provenance_and_deck_diagnostics_together: both kinds are reported.
+#[test]
+fn provenance_and_deck_diagnostics_together() {
+    let ctx = Ctx::new();
+    ctx.valid();
+    ctx.tamper("pr:", "number: 7", "number: 8");
+    ctx.set_slides(&["overview", "arch", "step-one", "arch"]);
+    assert_eq!(
+        ctx.diags(),
+        vec![
+            e(
+                "guide.yaml",
+                "pr.number",
+                "provenance_changed",
+                &prov_msg("pr.number")
+            ),
+            dup_slide(3, "arch", 1)
+        ]
+    );
+}
+
+/// X13 commits_kind_without_commits_is_internal_even_without_code: the row is
+/// rejected before any block is looked at.
+#[test]
+fn commits_kind_without_commits_is_internal_even_without_code() {
+    let ctx = Ctx::new();
+    ctx.valid();
+    ctx.put("step-one", &step("step-one", &[], &[]));
+    ctx.set_row(|j| {
+        let start = j.find("\"commits\":[").unwrap();
+        let end = j[start..].find(']').unwrap() + start + 1;
+        format!("{}\"commits\":[]{}", &j[..start], &j[end..])
+            .replace("\"kind\":\"full\"", "\"kind\":\"commits\"")
+    });
+    assert_err(
+        ctx.check_path(&ctx.draft),
+        "internal",
+        "internal error: the drafts row's provenance_json has selection kind commits but no commits",
+    );
+}
+
+/// X14 lossy_path_does_not_match (Linux only: macOS cannot name a non-UTF-8
+/// path): a row path holding U+FFFD must not match a path holding byte 0xFF.
+#[cfg(target_os = "linux")]
+#[test]
+fn lossy_path_does_not_match() {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+    let ctx = Ctx::new();
+    ctx.valid();
+    let tmp = TempDir::new().unwrap();
+    let root = canon(tmp.path());
+    let id = ctx.out.draft_id.clone();
+    let stored = root.join("h\u{FFFD}me").join(&id);
+    let raw = root.join(OsStr::from_bytes(b"h\xFFme")).join(&id);
+    fs::create_dir_all(&raw).unwrap();
+    let s = stored.to_str().unwrap().to_owned();
+    ctx.store()
+        .tx(|tx| -> Result<(), StoreError> {
+            tx.execute("UPDATE drafts SET path = ?1 WHERE id = ?2", (&s, &id))?;
+            Ok(())
+        })
+        .unwrap();
+    let err = ctx.check_path(&raw).unwrap_err();
+    assert_eq!(err.code(), "draft_unknown", "{err}");
+}

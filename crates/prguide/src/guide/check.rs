@@ -388,11 +388,23 @@ pub fn check_draft(git: &Git, dir: &Path, provenance_json: &str) -> Result<Check
             "the drafts row's provenance_json does not parse: {e}"
         ))
     })?;
-    if row.selection.kind == SelectionKind::Commits && row.selection.commits.is_empty() {
-        return Err(Error::Internal(
-            "the drafts row's provenance_json has selection kind commits but no commits".into(),
-        ));
-    }
+    let selection = match row.selection.kind {
+        SelectionKind::Full => Selection::Full,
+        SelectionKind::Commits => {
+            match (row.selection.commits.first(), row.selection.commits.last()) {
+                (Some(first), Some(last)) => Selection::Commits {
+                    first: first.clone(),
+                    last: last.clone(),
+                },
+                _ => {
+                    return Err(Error::Internal(
+                        "the drafts row's provenance_json has selection kind commits but no commits"
+                            .into(),
+                    ));
+                }
+            }
+        }
+    };
     let load = load_draft(dir);
     let mut out: Vec<Diagnostic> = Vec::new();
     for e in &load.errors {
@@ -424,20 +436,6 @@ pub fn check_draft(git: &Git, dir: &Path, provenance_json: &str) -> Result<Check
         flag_rules(slide, &mut out);
     }
     if load.slides.iter().any(|s| !s.front.code.is_empty()) {
-        let selection = match row.selection.kind {
-            SelectionKind::Full => Selection::Full,
-            SelectionKind::Commits => {
-                let (Some(first), Some(last)) =
-                    (row.selection.commits.first(), row.selection.commits.last())
-                else {
-                    return Err(Error::Internal("selection has no commits".into()));
-                };
-                Selection::Commits {
-                    first: first.clone(),
-                    last: last.clone(),
-                }
-            }
-        };
         let cx = BlockContext::new(
             git,
             0,
