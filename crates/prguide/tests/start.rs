@@ -1813,12 +1813,23 @@ const NFD: &str = "cafe\u{301}.txt";
 
 /// Builds a commit through the index, so both names of a colliding pair land in it.
 fn index_commit(fx: &FixtureRepo, entries: &[(&str, &str)], message: &str) -> String {
+    let moded: Vec<(&str, &str, &str)> = entries.iter().map(|(p, c)| (*p, "100644", *c)).collect();
+    index_commit_modes(fx, &moded, message)
+}
+
+/// Like `index_commit` with an explicit mode per entry. For mode `160000`
+/// the contents are the commit id the gitlink points at (no blob is made).
+fn index_commit_modes(fx: &FixtureRepo, entries: &[(&str, &str, &str)], message: &str) -> String {
     let scratch = TempDir::new().unwrap();
     let work = fx.work_path();
-    for (i, (path, contents)) in entries.iter().enumerate() {
-        let file = scratch.path().join(format!("blob{i}"));
-        fs::write(&file, contents).unwrap();
-        let oid = fx.run(work, ["hash-object", "-w", file.to_str().unwrap()]);
+    for (i, (path, mode, contents)) in entries.iter().enumerate() {
+        let oid = if *mode == "160000" {
+            contents.to_string()
+        } else {
+            let file = scratch.path().join(format!("blob{i}"));
+            fs::write(&file, contents).unwrap();
+            fx.run(work, ["hash-object", "-w", file.to_str().unwrap()])
+        };
         fx.run(
             work,
             [
@@ -1829,7 +1840,7 @@ fn index_commit(fx: &FixtureRepo, entries: &[(&str, &str)], message: &str) -> St
                 "update-index",
                 "--add",
                 "--cacheinfo",
-                &format!("100644,{oid},{path}"),
+                &format!("{mode},{oid},{path}"),
             ],
         );
     }
@@ -1837,7 +1848,7 @@ fn index_commit(fx: &FixtureRepo, entries: &[(&str, &str)], message: &str) -> St
     let head = fx.head();
     let listing = tgit_try(fx, work, &["ls-tree", "-r", "-z", "--name-only", &head]).unwrap();
     let records: Vec<&[u8]> = listing.split(|b| *b == 0).collect();
-    for (path, _) in entries {
+    for (path, _, _) in entries {
         assert!(
             records.contains(&path.as_bytes()),
             "{path:?} missing from the commit"
@@ -1978,6 +1989,56 @@ fn groups_of_three_nested_and_directory_collisions_are_sorted() {
             &["Zz/x.md", "zz/x.md"],
             &["sub/Case.txt", "sub/case.txt"],
         ])
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn gitlink_pair_and_symlink_file_pair_warn() {
+    assert_insensitive_tmp(true);
+    let ctx = Ctx::from_shape(|fx: &FixtureRepo| {
+        on_pr(fx);
+        let base = fx.head();
+        index_commit_modes(
+            fx,
+            &[
+                ("Sm", "160000", &base),
+                ("sm", "160000", &base),
+                ("Link", "120000", "target"),
+                ("link", "100644", "plain\n"),
+            ],
+            "pr",
+        )
+    });
+    let out = ctx.ok();
+    assert_eq!(
+        warnings_json(&out),
+        expected_warnings(&[&["Link", "link"], &["Sm", "sm"]])
+    );
+}
+
+#[test]
+fn resume_restores_tracked_files_renamed_to_nfd_outside_git() {
+    let mut ctx = Ctx::from_shape(index_shape(&[
+        (NFC, "nfc\n"),
+        ("r\u{e9}sum\u{e9}/a.md", "in dir\n"),
+    ]));
+    let out = ctx.ok();
+    ctx.stop(&out);
+    let nfd_dir = "re\u{301}sume\u{301}";
+    // Rename through a temp name so the move also works where NFC and NFD
+    // names are the same file.
+    for (from, to) in [(NFC, NFD), ("r\u{e9}sum\u{e9}", nfd_dir)] {
+        let tmp = out.worktree.join("tmp-rename");
+        fs::rename(out.worktree.join(from), &tmp).unwrap();
+        fs::rename(&tmp, out.worktree.join(to)).unwrap();
+    }
+    let out = ctx.ok();
+    assert_exact(&ctx.fx, &out.worktree, &ctx.head);
+    assert_eq!(fs::read(out.worktree.join(NFC)).unwrap(), b"nfc\n");
+    assert_eq!(
+        fs::read(out.worktree.join("r\u{e9}sum\u{e9}/a.md")).unwrap(),
+        b"in dir\n"
     );
 }
 

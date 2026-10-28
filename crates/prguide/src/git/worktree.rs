@@ -304,8 +304,16 @@ impl Git {
             &["checkout", "--detach", "--force", head],
             ceiling,
         )?;
-        git.isolated_run(&drivers, &["clean", "-ffdx"], ceiling)
-            .map(|_| ())
+        git.isolated_run(&drivers, &["clean", "-ffdx"], ceiling)?;
+        // `clean` can delete tracked files that something other than git
+        // renamed (e.g. NFC to NFD); a second checkout restores them so the
+        // worktree ends exactly at the head.
+        git.isolated_run(
+            &drivers,
+            &["checkout", "--detach", "--force", head],
+            ceiling,
+        )
+        .map(|_| ())
     }
 }
 
