@@ -643,6 +643,13 @@ fn create_review_when_threads_cannot_start_is_unknown() {
         fs::write(dir.path().join("hang"), "").unwrap();
         let result = gh(&dir).create_review(&repo(), 1, &request());
         println!("RESULT {result:?}");
+        // Give a surviving gh time to write its pid; a killed one is gone (or never wrote it).
+        std::thread::sleep(Duration::from_millis(700));
+        let gone = match fs::read_to_string(dir.path().join("pid")) {
+            Ok(_) => pid_is_gone(&dir),
+            Err(_) => true,
+        };
+        println!("GONE {gone}");
         return;
     }
     let started = Instant::now();
@@ -659,6 +666,7 @@ fn create_review_when_threads_cannot_start_is_unknown() {
         ),
         "{text}"
     );
+    assert!(text.contains("GONE true"), "gh was left running: {text}");
     assert!(started.elapsed() < Duration::from_secs(10));
 }
 
