@@ -55,7 +55,8 @@ impl GhCli {
         }
         command
             .env_remove("GH_FORCE_TTY")
-            .env_remove("CLICOLOR_FORCE");
+            .env_remove("CLICOLOR_FORCE")
+            .env_remove("GH_DEBUG");
         command
     }
 
@@ -713,6 +714,20 @@ mod tests {
             },
         )
     }
+    /// Exit code 4 comes first, whatever the stderr says.
+    #[test]
+    fn map_failure_exit_4_beats_a_404_line() {
+        let err = map_failure(
+            Some(4),
+            "gh: Not Found (HTTP 404)",
+            GitHubError::PrNotFound {
+                repo: "a/b".into(),
+                number: 1,
+            },
+        );
+        assert_eq!(err, unauthenticated("gh: Not Found (HTTP 404)"));
+    }
+
     fn not_found() -> GitHubError {
         GitHubError::PrNotFound {
             repo: "a/b".into(),

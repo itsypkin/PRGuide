@@ -139,6 +139,10 @@ fn snapshot_request() -> ReviewRequest {
 fn create_review_request_bytes_snapshot() {
     let dir = setup(&included("HTTP/2.0 200 OK", r#"{"id":1}"#), None, 0);
     let req = snapshot_request();
+    // Adding a second event variant (e.g. Approve) must fail to compile here.
+    match req.event {
+        ReviewEvent::Comment => {}
+    }
     gh(&dir).create_review(&repo(), 14148, &req).unwrap();
     let stdin = fs::read(dir.path().join("stdin")).unwrap();
     insta::assert_snapshot!(
@@ -179,7 +183,10 @@ fn create_review_without_comments_omits_the_key() {
 #[test]
 fn create_review_arguments_and_environment() {
     let dir = TempDir::new().unwrap();
-    let cli = gh(&dir).env("GH_FORCE_TTY", "1").env("CLICOLOR_FORCE", "1");
+    let cli = gh(&dir)
+        .env("GH_FORCE_TTY", "1")
+        .env("CLICOLOR_FORCE", "1")
+        .env("GH_DEBUG", "api");
     let _ = cli.create_review(&repo(), 14148, &request());
     assert_eq!(
         args_of(&dir),
@@ -197,7 +204,7 @@ fn create_review_arguments_and_environment() {
             "-"
         ]
     );
-    for file in ["gh_force_tty", "clicolor_force"] {
+    for file in ["gh_force_tty", "clicolor_force", "gh_debug"] {
         assert_eq!(
             fs::read_to_string(dir.path().join(file)).unwrap(),
             "unset\n"
@@ -953,6 +960,14 @@ fn two_comment_request(body: &str) -> ReviewRequest {
 fn fake_creates_reviews_and_records_requests() {
     let fake = FakeGitHub::new();
     let (one, two) = (repo(), Repo::github("cli", "cli").unwrap());
+    // Reviews are keyed by repo and number: another repo's PR 1 sees none.
+    let other = Repo::github("octo", "widget").unwrap();
+    {
+        let f = FakeGitHub::new();
+        f.create_review(&other, 1, &request()).unwrap();
+        assert_eq!(f.list_reviews(&one, 1), Ok(vec![]));
+        assert_eq!(f.review_comments(&one, 1, 1), Ok(vec![]));
+    }
     let r1 = two_comment_request("first");
     let r2 = ReviewRequest {
         body: "second".into(),
