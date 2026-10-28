@@ -497,6 +497,7 @@ fn wait_still_wins_against_concurrent_probes() {
                 while !stop.load(Ordering::Relaxed) {
                     status::agent_status(&mut store).expect("probe");
                     probes.fetch_add(1, Ordering::Relaxed);
+                    std::thread::sleep(Duration::from_millis(1));
                 }
             })
         })
