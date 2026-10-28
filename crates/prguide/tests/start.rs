@@ -2105,28 +2105,27 @@ fn collision_warnings_ignore_case_and_unicode_config() {
             }
             _ => {}
         }
-        let first = ctx.ok();
-        ctx.stop(&first);
-        let second = ctx.ok();
-        for (label, out) in [("first start", &first), ("resume", &second)] {
+        let check = |label: &str, out: &StartOutput| {
             assert_eq!(
                 warnings_json(out),
                 expected_warnings(&[&["Caf\u{e9}", "cafe\u{301}"], &["Docs", "docs"]]),
                 "{scope} {label}"
             );
-            assert_eq!(
-                fs::read(out.worktree.join("re\u{301}sume\u{301}.md")).unwrap(),
-                b"lone\n",
-                "{scope} {label}"
-            );
-            for (path, bytes) in [("Docs/a.md", b"a\n"), ("docs/b.md", b"b\n")] {
-                assert_eq!(
-                    fs::read(out.worktree.join(path)).unwrap(),
-                    bytes,
-                    "{scope} {label} {path}"
-                );
+            for (path, bytes) in [
+                ("re\u{301}sume\u{301}.md", b"lone\n".as_slice()),
+                ("Docs/a.md", b"a\n".as_slice()),
+                ("docs/b.md", b"b\n".as_slice()),
+            ] {
+                let got = fs::read(out.worktree.join(path))
+                    .unwrap_or_else(|e| panic!("{scope} {label} {path}: {e}"));
+                assert_eq!(got, bytes, "{scope} {label} {path}");
             }
-        }
+        };
+        let first = ctx.ok();
+        check("first start", &first);
+        ctx.stop(&first);
+        let second = ctx.ok();
+        check("resume", &second);
     }
 }
 
