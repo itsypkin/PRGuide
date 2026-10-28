@@ -256,7 +256,7 @@ impl Ctx {
             clock: Arc::new(FakeClock::new(Timestamp::from_unix_millis(ms))),
             repo: Repo::github("octo", "widget").unwrap(),
             run: String::new(),
-            out: unsafe_placeholder(),
+            out: empty_output(),
             draft: PathBuf::new(),
             fx,
         };
@@ -530,7 +530,7 @@ impl Ctx {
 }
 
 /// `GuideNewOutput` has no `Default`; build one through serde-free means.
-fn unsafe_placeholder() -> GuideNewOutput {
+fn empty_output() -> GuideNewOutput {
     use prguide::cli::{guide_new::SelectionOut, start::SnapshotOut};
     GuideNewOutput {
         draft_id: String::new(),
