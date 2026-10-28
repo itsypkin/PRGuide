@@ -15,6 +15,7 @@ use std::{
 use rusqlite::{Connection, ErrorCode, OpenFlags, TransactionBehavior};
 
 pub mod deepdives;
+pub mod drafts;
 pub mod events;
 pub mod migrations;
 pub mod outbox;

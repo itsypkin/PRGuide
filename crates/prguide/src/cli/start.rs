@@ -16,7 +16,7 @@ use crate::{
     cli::output::print_json,
     git::{
         Git, GitError, Refspec,
-        diff::{FileStatus, LineKind},
+        diff::{FileDiff, FileStatus, LineKind},
         parse_github_remote,
         refs::{fetch_base_ref, fetch_head_ref},
     },
@@ -72,6 +72,33 @@ pub struct FileOut {
     pub binary: bool,
     pub mode_only: bool,
     pub submodule: bool,
+}
+
+impl FileOut {
+    pub fn from_diff(f: &FileDiff) -> FileOut {
+        let count = |kind: LineKind| {
+            f.hunks
+                .iter()
+                .flat_map(|h| &h.lines)
+                .filter(|l| l.kind == kind)
+                .count()
+        };
+        FileOut {
+            path: f.path.to_string(),
+            old_path: f.old_path.as_ref().map(ToString::to_string),
+            status: match f.status {
+                FileStatus::Added => "added",
+                FileStatus::Modified => "modified",
+                FileStatus::Deleted => "deleted",
+                FileStatus::Renamed => "renamed",
+            },
+            additions: count(LineKind::Added),
+            deletions: count(LineKind::Removed),
+            binary: f.binary,
+            mode_only: f.mode_only,
+            submodule: f.submodule,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -157,30 +184,7 @@ pub fn start(env: &StartEnv<'_>, args: &StartArgs) -> Result<StartOutput, Error>
     let files = resolved
         .files(&git)?
         .into_iter()
-        .map(|f| {
-            let count = |kind: LineKind| {
-                f.hunks
-                    .iter()
-                    .flat_map(|h| &h.lines)
-                    .filter(|l| l.kind == kind)
-                    .count()
-            };
-            FileOut {
-                path: f.path.to_string(),
-                old_path: f.old_path.as_ref().map(ToString::to_string),
-                status: match f.status {
-                    FileStatus::Added => "added",
-                    FileStatus::Modified => "modified",
-                    FileStatus::Deleted => "deleted",
-                    FileStatus::Renamed => "renamed",
-                },
-                additions: count(LineKind::Added),
-                deletions: count(LineKind::Removed),
-                binary: f.binary,
-                mode_only: f.mode_only,
-                submodule: f.submodule,
-            }
-        })
+        .map(|f| FileOut::from_diff(&f))
         .collect();
     let guide_versions = ready_guide_versions(&mut store)?;
     let run = runs::start_run(&mut store, args.takeover)?;

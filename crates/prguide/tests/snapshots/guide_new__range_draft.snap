@@ -1,0 +1,53 @@
+---
+source: crates/prguide/tests/guide_new.rs
+expression: ctx.snapshot_json(&out)
+---
+{
+  "draft_id": "[DRAFT_ID]",
+  "draft": "[HOME]/prs/github.com/octo/widget/7/drafts/[DRAFT_ID]",
+  "worktree": "[HOME]/prs/github.com/octo/widget/7/worktree",
+  "snapshot": {
+    "base": "a07e1bce5d6c9a79fdf4a659cf2870830c87410a",
+    "head": "6ba5d1eebc33911ba3827b85100bd4e9c362b7c5"
+  },
+  "selection": {
+    "kind": "commits",
+    "base": "d2287beadcdd0e6c331c7fcff1df10d7ccca3906",
+    "head": "caa87af4d798ae61a2b76570b929fb259090f2a2"
+  },
+  "commits": [
+    {
+      "sha": "caa87af4d798ae61a2b76570b929fb259090f2a2",
+      "parents": [
+        "d2287beadcdd0e6c331c7fcff1df10d7ccca3906"
+      ],
+      "message": "c2",
+      "author": {
+        "name": "Fixture",
+        "login": null
+      }
+    }
+  ],
+  "files": [
+    {
+      "path": "one.txt",
+      "old_path": null,
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "binary": false,
+      "mode_only": false,
+      "submodule": false
+    },
+    {
+      "path": "two.txt",
+      "old_path": null,
+      "status": "added",
+      "additions": 1,
+      "deletions": 0,
+      "binary": false,
+      "mode_only": false,
+      "submodule": false
+    }
+  ]
+}

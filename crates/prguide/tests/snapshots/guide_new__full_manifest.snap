@@ -1,0 +1,16 @@
+---
+source: crates/prguide/tests/guide_new.rs
+expression: text
+---
+# Written by prguide guide new. Edit only `slides`.
+format: "prguide/v1"
+pr: { host: "github.com", repo: "octo/widget", number: 7 }
+snapshot: { base: "6556e18a42beb18e2ab799ab46ff5826b2367eb1", head: "050535dc182f568eed074a3c845fb06a03548241" }
+selection:
+  kind: full
+  base: "6556e18a42beb18e2ab799ab46ff5826b2367eb1"
+  head: "050535dc182f568eed074a3c845fb06a03548241"
+  commits:
+    - "3ac4775a2d7c4ad32610df05200ee68867360521"
+    - "050535dc182f568eed074a3c845fb06a03548241"
+slides: []

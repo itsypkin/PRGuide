@@ -19,6 +19,12 @@ pub enum GuideError {
     RangeHasMerge(String),
     #[error("{0}")]
     NoBaseCommit(String),
+    #[error("{0}")]
+    StoreBound(String),
+    #[error("{0}")]
+    PrHeadMoved(String),
+    #[error("{0}")]
+    CommitAmbiguous(String),
     #[error("{message}")]
     YamlInvalid {
         file: String,
@@ -165,6 +171,9 @@ impl GuideError {
             Self::RangeNotInPr(_) => "range_not_in_pr",
             Self::RangeHasMerge(_) => "range_has_merge",
             Self::NoBaseCommit(_) => "no_base_commit",
+            Self::StoreBound(_) => "store_bound",
+            Self::PrHeadMoved(_) => "pr_head_moved",
+            Self::CommitAmbiguous(_) => "commit_ambiguous",
             Self::YamlInvalid { .. } => "yaml_invalid",
             Self::YamlFeatureNotAllowed { .. } => "yaml_feature_not_allowed",
             Self::FieldUnknown { .. } => "field_unknown",
@@ -203,7 +212,12 @@ impl GuideError {
 
     fn place(&self) -> Option<(&str, &str)> {
         match self {
-            Self::RangeNotInPr(_) | Self::RangeHasMerge(_) | Self::NoBaseCommit(_) => None,
+            Self::RangeNotInPr(_)
+            | Self::RangeHasMerge(_)
+            | Self::NoBaseCommit(_)
+            | Self::StoreBound(_)
+            | Self::PrHeadMoved(_)
+            | Self::CommitAmbiguous(_) => None,
             Self::YamlInvalid { file, field, .. }
             | Self::YamlFeatureNotAllowed { file, field, .. }
             | Self::FieldUnknown { file, field, .. }
@@ -249,6 +263,18 @@ mod tests {
             GuideError::NoBaseCommit(String::new()).code(),
             "no_base_commit"
         );
+        for (error, code) in [
+            (GuideError::StoreBound(String::new()), "store_bound"),
+            (GuideError::PrHeadMoved(String::new()), "pr_head_moved"),
+            (
+                GuideError::CommitAmbiguous(String::new()),
+                "commit_ambiguous",
+            ),
+        ] {
+            assert_eq!(error.code(), code);
+            assert_eq!(error.file(), None);
+            assert_eq!(error.field(), None);
+        }
         let cases = [
             (
                 GuideError::YamlInvalid {
