@@ -1577,12 +1577,22 @@ fn unwritable_drafts_dir_is_store_io() {
     let drafts = ctx.store_dir().join("drafts");
     fs::create_dir_all(&drafts).unwrap();
     fs::set_permissions(&drafts, fs::Permissions::from_mode(0o555)).unwrap();
+    // Probe while still read-only: root ignores permissions, so nothing to assert.
+    let probe = drafts.join("probe");
+    let is_root = fs::write(&probe, b"").is_ok();
+    if is_root {
+        fs::remove_file(&probe).unwrap();
+    }
     let r = ctx.gn(None);
     fs::set_permissions(&drafts, fs::Permissions::from_mode(0o755)).unwrap();
-    if fs::write(drafts.join("probe"), b"").is_ok() {
-        // Running as a user who ignores permissions (root): nothing to assert.
+    if is_root {
         return;
     }
     assert_err(r, "store_io", &["drafts"]);
     assert!(ctx.drafts_rows().is_empty());
+    assert_eq!(
+        fs::read_dir(&drafts).unwrap().count(),
+        0,
+        "drafts/ not empty"
+    );
 }
