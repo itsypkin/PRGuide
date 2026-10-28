@@ -70,7 +70,17 @@ pub fn expand_commit(given: &str, pr_commits: &[String]) -> Result<String, Error
 
 /// A valid YAML double-quoted scalar.
 fn quote(s: &str) -> String {
-    serde_json::Value::String(s.to_owned()).to_string()
+    let json = serde_json::Value::String(s.to_owned()).to_string();
+    // JSON leaves DEL, the C1 controls, U+FFFE and U+FFFF raw; YAML rejects them, so escape them.
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        if ('\u{7f}'..='\u{9f}').contains(&c) || c == '\u{fffe}' || c == '\u{ffff}' {
+            out.push_str(&format!("\\u{:04X}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// The exact `guide.yaml` of a new draft.
@@ -106,4 +116,42 @@ pub fn render_manifest(p: &Provenance) -> String {
     }
     out.push_str("slides: []\n");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::guide::parse::parse_manifest;
+
+    /// m1 DEL and C1 controls survive a render and parse round trip.
+    #[test]
+    fn quote_escapes_del_and_c1_controls() {
+        let nasty = "a\u{7f}b\u{85}c\u{9b}d\u{80}e\u{9f}f\u{fffe}g\u{ffff}";
+        let p = Provenance {
+            format: "prguide/v1".into(),
+            pr: ManifestPr {
+                host: "github.com".into(),
+                repo: nasty.into(),
+                number: 7,
+            },
+            snapshot: ManifestSnapshot {
+                base: "aaaa".into(),
+                head: "bbbb".into(),
+            },
+            selection: ManifestSelection {
+                kind: SelectionKind::Full,
+                base: "aaaa".into(),
+                head: "bbbb".into(),
+                commits: vec![],
+            },
+        };
+        let text = render_manifest(&p);
+        assert!(
+            !text
+                .chars()
+                .any(|c| ('\u{7f}'..='\u{9f}').contains(&c) || c == '\u{fffe}' || c == '\u{ffff}')
+        );
+        let m = parse_manifest(&text).expect("parses");
+        assert_eq!(m.pr.repo, nasty);
+    }
 }

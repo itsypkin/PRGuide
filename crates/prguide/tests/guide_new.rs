@@ -1508,10 +1508,18 @@ fn render_manifest_layout() {
     assert!(m.slides.is_empty());
     let p = provenance(SelectionKind::Full, &[]);
     let text = render_manifest(&p);
-    assert!(
-        text.contains(
-            "  kind: full\n  base: \"aaaa\"\n  head: \"bbbb\"\n  commits: []\nslides: []\n"
-        )
+    assert_eq!(
+        text,
+        "# Written by prguide guide new. Edit only `slides`.\n\
+         format: \"prguide/v1\"\n\
+         pr: { host: \"github.com\", repo: \"Octo/Widget\", number: 7 }\n\
+         snapshot: { base: \"1234\", head: \"1e000\" }\n\
+         selection:\n\
+         \x20 kind: full\n\
+         \x20 base: \"aaaa\"\n\
+         \x20 head: \"bbbb\"\n\
+         \x20 commits: []\n\
+         slides: []\n"
     );
     let m = parse_manifest(&text).unwrap();
     assert_eq!(Provenance::from_manifest(&m), p);
@@ -1594,5 +1602,94 @@ fn unwritable_drafts_dir_is_store_io() {
         fs::read_dir(&drafts).unwrap().count(),
         0,
         "drafts/ not empty"
+    );
+}
+
+/// B1 the fetch and snapshot use the PR's current base_ref.
+#[test]
+fn current_base_ref_is_fetched() {
+    let (ctx, t) = Ctx::three();
+    ctx.start();
+    ctx.fx.run(
+        ctx.fx.work_path(),
+        [
+            "push".to_owned(),
+            "--force".into(),
+            "origin".into(),
+            format!("{}:refs/heads/release", t.c1),
+        ],
+    );
+    let mut pr = ctx.pr(&t.c3);
+    pr.base_ref = "release".into();
+    pr.base_sha = t.c1.clone();
+    ctx.fake.set_pr(&ctx.repo, pr);
+    let all = ctx.pr_commits();
+    let rest: Vec<Commit> = all.into_iter().filter(|c| c.sha != t.c1).collect();
+    ctx.fake.set_commits(&ctx.repo, 7, rest);
+    let out = ctx.ok(None);
+    assert_eq!(out.snapshot.base, t.c1);
+    assert_eq!(
+        tgit(
+            &ctx.fx,
+            &ctx.clone,
+            &["rev-parse", "refs/prguide/7/fetch/base"]
+        ),
+        t.c1
+    );
+}
+
+/// B2 the draft is staged in drafts/<id>.partial until the row is inserted.
+#[test]
+fn draft_is_staged_as_partial_before_the_row() {
+    use std::sync::Mutex;
+    struct Spy {
+        inner: Arc<FakeClock>,
+        drafts: PathBuf,
+        seen: Mutex<Vec<Vec<String>>>,
+    }
+    impl Clock for Spy {
+        fn now(&self) -> Timestamp {
+            let mut names: Vec<String> = fs::read_dir(&self.drafts)
+                .map(|d| {
+                    d.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            names.sort();
+            self.seen.lock().unwrap().push(names);
+            self.inner.now()
+        }
+    }
+    let ctx = Ctx::new();
+    ctx.start();
+    let spy = Arc::new(Spy {
+        inner: ctx.clock.clone(),
+        drafts: ctx.store_dir().join("drafts"),
+        seen: Mutex::new(vec![]),
+    });
+    let clock: Arc<dyn Clock> = spy.clone();
+    let env = GuideNewEnv {
+        git: ctx.fx.git(&ctx.clone),
+        github: &ctx.fake,
+        home: ctx.home.clone(),
+        clock,
+    };
+    let out = guide_new(
+        &env,
+        &GuideNewArgs {
+            run: ctx.run.borrow().clone(),
+            commits: None,
+        },
+    )
+    .unwrap();
+    let partial = format!("{}.partial", out.draft_id);
+    let seen = spy.seen.lock().unwrap();
+    assert!(
+        seen.iter().any(|l| l.len() == 1 && l[0] == partial),
+        "{seen:?}"
+    );
+    assert!(
+        seen.iter().all(|l| !l.contains(&out.draft_id)),
+        "draft visible before the row: {seen:?}"
     );
 }

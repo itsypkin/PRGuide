@@ -249,6 +249,7 @@ impl GuideError {
 mod tests {
     use super::GuideError;
 
+    /// U1 error codes are stable.
     #[test]
     fn error_codes_are_stable() {
         assert_eq!(
