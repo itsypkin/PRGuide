@@ -112,6 +112,12 @@ pub struct GuideVersionOut {
     pub ready_at: Option<String>,
 }
 
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct WarningOut {
+    pub code: &'static str,
+    pub paths: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct StartOutput {
     pub run_id: RunId,
@@ -122,6 +128,9 @@ pub struct StartOutput {
     pub commits: Vec<Commit>,
     pub files: Vec<FileOut>,
     pub guide_versions: Vec<GuideVersionOut>,
+    /// Absent when empty, so output without a warning is unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<WarningOut>,
 }
 
 /// Runs `prguide start` against the real environment.
@@ -178,6 +187,14 @@ pub fn start(env: &StartEnv<'_>, args: &StartArgs) -> Result<StartOutput, Error>
     }
     let worktree = store_dir.join("worktree");
     git.prepare_worktree(&clone, &worktree, &head)?;
+    let warnings: Vec<WarningOut> = git
+        .path_collisions(&worktree, &head)?
+        .into_iter()
+        .map(|paths| WarningOut {
+            code: "path_collision",
+            paths,
+        })
+        .collect();
     let snapshot = Snapshot::new(&git, &head, &base_tip)?;
     let shas: Vec<String> = commits.iter().map(|c| c.sha.clone()).collect();
     let resolved = Selection::Full.resolve(&git, &snapshot, &shas)?;
@@ -210,6 +227,7 @@ pub fn start(env: &StartEnv<'_>, args: &StartArgs) -> Result<StartOutput, Error>
         commits,
         files,
         guide_versions,
+        warnings,
     })
 }
 

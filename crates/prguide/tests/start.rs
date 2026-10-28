@@ -65,6 +65,8 @@ const NEUTRAL: &[&str] = &[
     "core.autocrlf=false",
     "-c",
     "core.attributesFile=/dev/null",
+    "-c",
+    "core.precomposeunicode=false",
 ];
 
 fn tgit_try(
@@ -1802,4 +1804,394 @@ fn relative_worktree_config_leaves_reviewer_config_untouched() {
     let out = ctx.ok();
     assert_eq!(fs::read(&config).unwrap(), before);
     assert_exact(&ctx.fx, &out.worktree, &ctx.head);
+}
+
+// ------------------------------------------------- path collision warnings
+
+const NFC: &str = "caf\u{e9}.txt";
+const NFD: &str = "cafe\u{301}.txt";
+
+/// Builds a commit through the index, so both names of a colliding pair land in it.
+fn index_commit(fx: &FixtureRepo, entries: &[(&str, &str)], message: &str) -> String {
+    let moded: Vec<(&str, &str, &str)> = entries.iter().map(|(p, c)| (*p, "100644", *c)).collect();
+    index_commit_modes(fx, &moded, message)
+}
+
+/// Like `index_commit` with an explicit mode per entry. For mode `160000`
+/// the contents are the commit id the gitlink points at (no blob is made).
+fn index_commit_modes(fx: &FixtureRepo, entries: &[(&str, &str, &str)], message: &str) -> String {
+    let scratch = TempDir::new().unwrap();
+    let work = fx.work_path();
+    for (i, (path, mode, contents)) in entries.iter().enumerate() {
+        let oid = if *mode == "160000" {
+            contents.to_string()
+        } else {
+            let file = scratch.path().join(format!("blob{i}"));
+            fs::write(&file, contents).unwrap();
+            fx.run(work, ["hash-object", "-w", file.to_str().unwrap()])
+        };
+        fx.run(
+            work,
+            [
+                "-c",
+                "core.precomposeunicode=false",
+                "-c",
+                "core.ignorecase=false",
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("{mode},{oid},{path}"),
+            ],
+        );
+    }
+    fx.run(work, ["commit", "-q", "-m", message]);
+    let head = fx.head();
+    let listing = tgit_try(fx, work, &["ls-tree", "-r", "-z", "--name-only", &head]).unwrap();
+    let records: Vec<&[u8]> = listing.split(|b| *b == 0).collect();
+    for (path, _, _) in entries {
+        assert!(
+            records.contains(&path.as_bytes()),
+            "{path:?} missing from the commit"
+        );
+    }
+    head
+}
+
+fn index_shape(entries: &[(&str, &str)]) -> impl FnOnce(&FixtureRepo) -> String {
+    let entries: Vec<(String, String)> = entries
+        .iter()
+        .map(|(p, c)| (p.to_string(), c.to_string()))
+        .collect();
+    move |fx| {
+        on_pr(fx);
+        let refs: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|(p, c)| (p.as_str(), c.as_str()))
+            .collect();
+        index_commit(fx, &refs, "pr")
+    }
+}
+
+impl Ctx {
+    fn advance_index(&mut self, entries: &[(&str, &str)], removed: &[&str]) -> String {
+        for path in removed {
+            self.fx.run(
+                self.fx.work_path(),
+                [
+                    "-c",
+                    "core.precomposeunicode=false",
+                    "rm",
+                    "-q",
+                    "--cached",
+                    path,
+                ],
+            );
+        }
+        let head = index_commit(&self.fx, entries, "advance");
+        self.fx.push_pr(7, &head);
+        self.publish(&head);
+        self.head = head.clone();
+        head
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn warnings_json(out: &StartOutput) -> String {
+    serde_json::to_string(&out.warnings).unwrap()
+}
+
+#[cfg(target_os = "macos")]
+fn expected_warnings(groups: &[&[&str]]) -> String {
+    let items: Vec<serde_json::Value> = groups
+        .iter()
+        .map(|g| serde_json::json!({"code": "path_collision", "paths": g}))
+        .collect();
+    serde_json::to_string(&items).unwrap()
+}
+
+fn has_warnings_key(out: &StartOutput) -> bool {
+    serde_json::to_value(out)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .contains_key("warnings")
+}
+
+fn assert_insensitive_tmp(insensitive: bool) {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("probe"), "x").unwrap();
+    fs::write(dir.path().join(NFC), "x").unwrap();
+    assert_eq!(
+        fs::symlink_metadata(dir.path().join("PROBE")).is_ok(),
+        insensitive,
+        "case sensitivity of {} is not as this test needs",
+        dir.path().display()
+    );
+    assert_eq!(
+        fs::symlink_metadata(dir.path().join(NFD)).is_ok(),
+        insensitive,
+        "normalisation sensitivity of {} is not as this test needs",
+        dir.path().display()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn case_pair_warns_on_a_case_insensitive_filesystem() {
+    assert_insensitive_tmp(true);
+    let ctx = Ctx::from_shape(index_shape(&[
+        ("Notes.md", "upper\n"),
+        ("notes.md", "lower\n"),
+    ]));
+    let before = state(&ctx.fx, &ctx.clone, &[]);
+    let out = ctx.ok();
+    assert!(before == state(&ctx.fx, &ctx.clone, &[]), "clone changed");
+    assert_eq!(
+        warnings_json(&out),
+        expected_warnings(&[&["Notes.md", "notes.md"]])
+    );
+    insta::assert_snapshot!("case_collision", ctx.snapshot_json(&out));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn nfc_nfd_pair_warns_on_a_normalisation_insensitive_filesystem() {
+    assert_insensitive_tmp(true);
+    let ctx = Ctx::from_shape(index_shape(&[(NFC, "nfc\n"), (NFD, "nfd\n")]));
+    let out = ctx.ok();
+    assert_eq!(warnings_json(&out), expected_warnings(&[&[NFD, NFC]]));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn groups_of_three_nested_and_directory_collisions_are_sorted() {
+    assert_insensitive_tmp(true);
+    let ctx = Ctx::from_shape(index_shape(&[
+        ("Readme.md", "2\n"),
+        ("readme.md", "3\n"),
+        ("sub/Case.txt", "C\n"),
+        ("sub/case.txt", "c\n"),
+        ("Docs/a.md", "a\n"),
+        ("docs/b.md", "b\n"),
+        ("Lib/x.rs", "x\n"),
+        ("lib", "file\n"),
+        ("Zz/x.md", "Z\n"),
+        ("zz/x.md", "z\n"),
+    ]));
+    let out = ctx.ok();
+    assert_eq!(
+        warnings_json(&out),
+        expected_warnings(&[
+            &["Docs", "docs"],
+            &["Lib", "lib"],
+            &["README.md", "Readme.md", "readme.md"],
+            &["Zz", "zz"],
+            &["Zz/x.md", "zz/x.md"],
+            &["sub/Case.txt", "sub/case.txt"],
+        ])
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn gitlink_pair_and_symlink_file_pair_warn() {
+    assert_insensitive_tmp(true);
+    let ctx = Ctx::from_shape(|fx: &FixtureRepo| {
+        on_pr(fx);
+        let base = fx.head();
+        index_commit_modes(
+            fx,
+            &[
+                ("Sm", "160000", &base),
+                ("sm", "160000", &base),
+                ("Link", "120000", "target"),
+                ("link", "100644", "plain\n"),
+            ],
+            "pr",
+        )
+    });
+    let out = ctx.ok();
+    assert_eq!(
+        warnings_json(&out),
+        expected_warnings(&[&["Link", "link"], &["Sm", "sm"]])
+    );
+}
+
+#[test]
+fn resume_restores_tracked_files_renamed_to_nfd_outside_git() {
+    let ctx = Ctx::from_shape(index_shape(&[
+        (NFC, "nfc\n"),
+        ("r\u{e9}sum\u{e9}/a.md", "in dir\n"),
+    ]));
+    let out = ctx.ok();
+    ctx.stop(&out);
+    let nfd_dir = "re\u{301}sume\u{301}";
+    // Rename through a temp name so the move also works where NFC and NFD
+    // names are the same file.
+    for (from, to) in [(NFC, NFD), ("r\u{e9}sum\u{e9}", nfd_dir)] {
+        let tmp = out.worktree.join("tmp-rename");
+        fs::rename(out.worktree.join(from), &tmp).unwrap();
+        fs::rename(&tmp, out.worktree.join(to)).unwrap();
+    }
+    let out = ctx.ok();
+    assert_exact(&ctx.fx, &out.worktree, &ctx.head);
+    assert_eq!(fs::read(out.worktree.join(NFC)).unwrap(), b"nfc\n");
+    assert_eq!(
+        fs::read(out.worktree.join("r\u{e9}sum\u{e9}/a.md")).unwrap(),
+        b"in dir\n"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn names_containing_a_tab_are_still_checked_for_collisions() {
+    assert_insensitive_tmp(true);
+    let ctx = Ctx::from_shape(index_shape(&[("a\tb.md", "1\n"), ("A\tb.md", "2\n")]));
+    let out = ctx.ok();
+    assert_eq!(
+        warnings_json(&out),
+        expected_warnings(&[&["A\tb.md", "a\tb.md"]])
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn resume_warns_after_the_reset_and_clears_when_the_pair_is_gone() {
+    assert_insensitive_tmp(true);
+    let mut ctx = Ctx::from_shape(index_shape(&[("a.txt", "a\n")]));
+    let out = ctx.ok();
+    assert!(!has_warnings_key(&out));
+    ctx.stop(&out);
+    ctx.advance_index(&[("Notes.md", "upper\n"), ("notes.md", "lower\n")], &[]);
+    let out = ctx.ok();
+    assert_eq!(
+        warnings_json(&out),
+        expected_warnings(&[&["Notes.md", "notes.md"]])
+    );
+    ctx.stop(&out);
+    let head = ctx.advance_index(&[], &["notes.md"]);
+    let out = ctx.ok();
+    assert!(!has_warnings_key(&out));
+    assert_exact(&ctx.fx, &out.worktree, &head);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn collision_warnings_ignore_case_and_unicode_config() {
+    assert_insensitive_tmp(true);
+    let entries = [
+        ("Caf\u{e9}", "1\n"),
+        ("cafe\u{301}", "2\n"),
+        ("Docs/a.md", "a\n"),
+        ("docs/b.md", "b\n"),
+        ("re\u{301}sume\u{301}.md", "lone\n"),
+    ];
+    for scope in ["default", "local", "global"] {
+        let ctx = Ctx::from_shape(index_shape(&entries));
+        match scope {
+            "local" => {
+                ctx.fx
+                    .run(&ctx.clone, ["config", "core.ignorecase", "false"]);
+                ctx.fx
+                    .run(&ctx.clone, ["config", "core.precomposeunicode", "true"]);
+            }
+            "global" => {
+                ctx.fx
+                    .run(&ctx.clone, ["config", "--unset", "core.ignorecase"]);
+                ctx.fx
+                    .run(&ctx.clone, ["config", "--unset", "core.precomposeunicode"]);
+                gconfig(&ctx.fx, "core.ignorecase", "false");
+                gconfig(&ctx.fx, "core.precomposeunicode", "true");
+            }
+            _ => {}
+        }
+        let check = |label: &str, out: &StartOutput| {
+            assert_eq!(
+                warnings_json(out),
+                expected_warnings(&[&["Caf\u{e9}", "cafe\u{301}"], &["Docs", "docs"]]),
+                "{scope} {label}"
+            );
+            for (path, bytes) in [
+                ("re\u{301}sume\u{301}.md", b"lone\n".as_slice()),
+                ("Docs/a.md", b"a\n".as_slice()),
+                ("docs/b.md", b"b\n".as_slice()),
+            ] {
+                let got = fs::read(out.worktree.join(path))
+                    .unwrap_or_else(|e| panic!("{scope} {label} {path}: {e}"));
+                assert_eq!(got, bytes, "{scope} {label} {path}");
+            }
+        };
+        let first = ctx.ok();
+        check("first start", &first);
+        ctx.stop(&first);
+        let second = ctx.ok();
+        check("resume", &second);
+    }
+}
+
+#[test]
+fn nfd_named_file_and_directory_survive_start_and_resume() {
+    let mut ctx = Ctx::from_shape(index_shape(&[
+        (NFD, "nfd\n"),
+        ("re\u{301}sume\u{301}/a.md", "in dir\n"),
+    ]));
+    if cfg!(target_os = "macos") {
+        assert_eq!(
+            ctx.fx.run(&ctx.clone, ["config", "core.precomposeunicode"]),
+            "true"
+        );
+    }
+    let check = |ctx: &Ctx, out: &StartOutput, head: &str| {
+        assert!(!has_warnings_key(out));
+        assert_exact(&ctx.fx, &out.worktree, head);
+        assert_eq!(fs::read(out.worktree.join(NFD)).unwrap(), b"nfd\n");
+        assert_eq!(
+            fs::read(out.worktree.join("re\u{301}sume\u{301}/a.md")).unwrap(),
+            b"in dir\n"
+        );
+    };
+    // (inode, mtime in ns) of both paths: a reset that deleted and recreated
+    // them would change these.
+    let ident = |out: &StartOutput| {
+        use std::os::unix::fs::MetadataExt;
+        [NFD, "re\u{301}sume\u{301}/a.md"].map(|p| {
+            let m = fs::metadata(out.worktree.join(p)).unwrap();
+            (m.ino(), m.mtime(), m.mtime_nsec())
+        })
+    };
+    let out = ctx.ok();
+    check(&ctx, &out, &ctx.head);
+    let before = ident(&out);
+    ctx.stop(&out);
+    let out = ctx.ok();
+    check(&ctx, &out, &ctx.head);
+    assert_eq!(ident(&out), before, "resume on the same head");
+    ctx.stop(&out);
+    let head = ctx.advance_index(&[("z.txt", "z\n")], &[]);
+    let out = ctx.ok();
+    check(&ctx, &out, &head);
+    assert_eq!(ident(&out), before, "resume to a new head");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn case_and_unicode_pairs_do_not_collide_on_linux() {
+    assert_insensitive_tmp(false);
+    let ctx = Ctx::from_shape(index_shape(&[
+        ("Notes.md", "upper\n"),
+        ("notes.md", "lower\n"),
+        (NFC, "nfc\n"),
+        (NFD, "nfd\n"),
+    ]));
+    let out = ctx.ok();
+    assert!(!has_warnings_key(&out));
+    assert_exact(&ctx.fx, &out.worktree, &ctx.head);
+    for (p, c) in [
+        ("Notes.md", "upper\n"),
+        ("notes.md", "lower\n"),
+        (NFC, "nfc\n"),
+        (NFD, "nfd\n"),
+    ] {
+        assert_eq!(fs::read(out.worktree.join(p)).unwrap(), c.as_bytes());
+    }
 }

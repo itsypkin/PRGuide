@@ -1,0 +1,69 @@
+---
+source: crates/prguide/tests/start.rs
+expression: ctx.snapshot_json(&out)
+---
+{
+  "run_id": "[RUN]",
+  "store": "[HOME]/prs/github.com/octo/widget/7",
+  "worktree": "[HOME]/prs/github.com/octo/widget/7/worktree",
+  "pr": {
+    "repo": "octo/widget",
+    "number": 7,
+    "url": "https://github.com/octo/widget/pull/7",
+    "state": "open",
+    "title": "Add things",
+    "body": "A body.",
+    "author": "octocat",
+    "base_ref": "main",
+    "head_sha": "f3ad463f7cd667c3b146799736c21b9bff25bfd3"
+  },
+  "snapshot": {
+    "base": "2b6725c17b17fff6f75aacd842a231f61889fcc5",
+    "head": "f3ad463f7cd667c3b146799736c21b9bff25bfd3"
+  },
+  "commits": [
+    {
+      "sha": "f3ad463f7cd667c3b146799736c21b9bff25bfd3",
+      "parents": [
+        "2b6725c17b17fff6f75aacd842a231f61889fcc5"
+      ],
+      "message": "pr",
+      "author": {
+        "name": "Fixture",
+        "login": null
+      }
+    }
+  ],
+  "files": [
+    {
+      "path": "Notes.md",
+      "old_path": null,
+      "status": "added",
+      "additions": 1,
+      "deletions": 0,
+      "binary": false,
+      "mode_only": false,
+      "submodule": false
+    },
+    {
+      "path": "notes.md",
+      "old_path": null,
+      "status": "added",
+      "additions": 1,
+      "deletions": 0,
+      "binary": false,
+      "mode_only": false,
+      "submodule": false
+    }
+  ],
+  "guide_versions": [],
+  "warnings": [
+    {
+      "code": "path_collision",
+      "paths": [
+        "Notes.md",
+        "notes.md"
+      ]
+    }
+  ]
+}
