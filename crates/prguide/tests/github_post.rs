@@ -186,7 +186,8 @@ fn create_review_arguments_and_environment() {
     let cli = gh(&dir)
         .env("GH_FORCE_TTY", "1")
         .env("CLICOLOR_FORCE", "1")
-        .env("GH_DEBUG", "api");
+        .env("GH_DEBUG", "api")
+        .env("DEBUG", "api");
     let _ = cli.create_review(&repo(), 14148, &request());
     assert_eq!(
         args_of(&dir),
@@ -204,7 +205,7 @@ fn create_review_arguments_and_environment() {
             "-"
         ]
     );
-    for file in ["gh_force_tty", "clicolor_force", "gh_debug"] {
+    for file in ["gh_force_tty", "clicolor_force", "gh_debug", "debug"] {
         assert_eq!(
             fs::read_to_string(dir.path().join(file)).unwrap(),
             "unset\n"

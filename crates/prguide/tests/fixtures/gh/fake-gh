@@ -19,6 +19,7 @@ done >> "$dir/args"
 printf '%s\n' "${GH_FORCE_TTY-unset}" > "$dir/gh_force_tty"
 printf '%s\n' "${CLICOLOR_FORCE-unset}" > "$dir/clicolor_force"
 printf '%s\n' "${GH_DEBUG-unset}" > "$dir/gh_debug"
+printf '%s\n' "${DEBUG-unset}" > "$dir/debug"
 if [ ! -f "$dir/noread" ]; then cat > "$dir/stdin"; fi
 if [ -f "$dir/delay" ]; then sleep "$(cat "$dir/delay")"; fi
 if [ -f "$dir/stdout" ]; then cat "$dir/stdout"; fi

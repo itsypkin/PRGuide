@@ -56,7 +56,8 @@ impl GhCli {
         command
             .env_remove("GH_FORCE_TTY")
             .env_remove("CLICOLOR_FORCE")
-            .env_remove("GH_DEBUG");
+            .env_remove("GH_DEBUG")
+            .env_remove("DEBUG");
         command
     }
 
