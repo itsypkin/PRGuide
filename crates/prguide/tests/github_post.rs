@@ -617,7 +617,7 @@ fn create_review_with_a_missing_gh() {
     );
 }
 
-/// P19b a gh that cannot be run for another reason than being missing.
+/// A gh that cannot be run for another reason than being missing (a spawn error besides P19's).
 #[test]
 fn create_review_with_a_non_executable_gh() {
     let dir = TempDir::new().unwrap();
@@ -630,6 +630,36 @@ fn create_review_with_a_non_executable_gh() {
         }) => assert!(stderr.starts_with("failed to run"), "{stderr}"),
         other => panic!("unexpected {other:?}"),
     }
+}
+
+/// A start failure of gh's pipe threads: the child test binary runs with an absurd thread
+/// stack size so spawning them fails; create_review must kill gh and report an unknown outcome.
+#[test]
+fn create_review_when_threads_cannot_start_is_unknown() {
+    const MARK: &str = "PRGUIDE_THREAD_FAIL_CHILD";
+    const NAME: &str = "create_review_when_threads_cannot_start_is_unknown";
+    if std::env::var_os(MARK).is_some() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("hang"), "").unwrap();
+        let result = gh(&dir).create_review(&repo(), 1, &request());
+        println!("RESULT {result:?}");
+        return;
+    }
+    let started = Instant::now();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+        .env(MARK, "1")
+        .env("RUST_MIN_STACK", "140737488355328")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains(
+            "RESULT Err(GhUnknownOutcome { reason: \"could not start a thread for gh's pipes\" })"
+        ),
+        "{text}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(10));
 }
 
 fn reviews_from(value: &Value) -> Vec<Review> {
