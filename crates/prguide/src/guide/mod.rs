@@ -163,6 +163,68 @@ pub enum GuideError {
         field: String,
         message: String,
     },
+    #[error("{message}")]
+    ProvenanceChanged {
+        file: String,
+        field: String,
+        message: String,
+    },
+    #[error("{message}")]
+    SlideFileMissing {
+        file: String,
+        field: String,
+        message: String,
+    },
+    #[error("{message}")]
+    DuplicateSlideId {
+        file: String,
+        field: String,
+        message: String,
+    },
+    #[error("{message}")]
+    OverviewFirst {
+        file: String,
+        field: String,
+        message: String,
+    },
+    #[error("{message}")]
+    NoSteps {
+        file: String,
+        field: String,
+        message: String,
+    },
+    #[error("{message}")]
+    NoArchitecture {
+        file: String,
+        field: String,
+        message: String,
+    },
+    #[error("{message}")]
+    UnlistedSlide {
+        file: String,
+        field: String,
+        message: String,
+    },
+    #[error("{message}")]
+    DuplicateBlockId {
+        file: String,
+        field: String,
+        message: String,
+    },
+    #[error("{message}")]
+    FlagBlockUnknown {
+        file: String,
+        field: String,
+        message: String,
+    },
+    #[error("{message}")]
+    FlagLineOutOfRange {
+        file: String,
+        field: String,
+        message: String,
+    },
+    #[error("{0}")]
+    DraftUnknown(String),
 }
 
 impl GuideError {
@@ -197,6 +259,17 @@ impl GuideError {
             Self::DraftInvalid { .. } => "draft_invalid",
             Self::FileUnreadable { .. } => "file_unreadable",
             Self::FileNotUtf8 { .. } => "file_not_utf8",
+            Self::ProvenanceChanged { .. } => "provenance_changed",
+            Self::SlideFileMissing { .. } => "slide_file_missing",
+            Self::DuplicateSlideId { .. } => "duplicate_slide_id",
+            Self::OverviewFirst { .. } => "overview_first",
+            Self::NoSteps { .. } => "no_steps",
+            Self::NoArchitecture { .. } => "no_architecture",
+            Self::UnlistedSlide { .. } => "unlisted_slide",
+            Self::DuplicateBlockId { .. } => "duplicate_block_id",
+            Self::FlagBlockUnknown { .. } => "flag_block_unknown",
+            Self::FlagLineOutOfRange { .. } => "flag_line_out_of_range",
+            Self::DraftUnknown(_) => "draft_unknown",
         }
     }
 
@@ -217,7 +290,8 @@ impl GuideError {
             | Self::NoBaseCommit(_)
             | Self::StoreBound(_)
             | Self::PrHeadMoved(_)
-            | Self::CommitAmbiguous(_) => None,
+            | Self::CommitAmbiguous(_)
+            | Self::DraftUnknown(_) => None,
             Self::YamlInvalid { file, field, .. }
             | Self::YamlFeatureNotAllowed { file, field, .. }
             | Self::FieldUnknown { file, field, .. }
@@ -240,7 +314,17 @@ impl GuideError {
             | Self::ManifestMissing { file, field, .. }
             | Self::DraftInvalid { file, field, .. }
             | Self::FileUnreadable { file, field, .. }
-            | Self::FileNotUtf8 { file, field, .. } => Some((file, field)),
+            | Self::FileNotUtf8 { file, field, .. }
+            | Self::ProvenanceChanged { file, field, .. }
+            | Self::SlideFileMissing { file, field, .. }
+            | Self::DuplicateSlideId { file, field, .. }
+            | Self::OverviewFirst { file, field, .. }
+            | Self::NoSteps { file, field, .. }
+            | Self::NoArchitecture { file, field, .. }
+            | Self::UnlistedSlide { file, field, .. }
+            | Self::DuplicateBlockId { file, field, .. }
+            | Self::FlagBlockUnknown { file, field, .. }
+            | Self::FlagLineOutOfRange { file, field, .. } => Some((file, field)),
         }
     }
 }
@@ -461,11 +545,102 @@ mod tests {
                 },
                 "file_not_utf8",
             ),
+            (
+                GuideError::ProvenanceChanged {
+                    file: String::new(),
+                    field: String::new(),
+                    message: String::new(),
+                },
+                "provenance_changed",
+            ),
+            (
+                GuideError::SlideFileMissing {
+                    file: String::new(),
+                    field: String::new(),
+                    message: String::new(),
+                },
+                "slide_file_missing",
+            ),
+            (
+                GuideError::DuplicateSlideId {
+                    file: String::new(),
+                    field: String::new(),
+                    message: String::new(),
+                },
+                "duplicate_slide_id",
+            ),
+            (
+                GuideError::OverviewFirst {
+                    file: String::new(),
+                    field: String::new(),
+                    message: String::new(),
+                },
+                "overview_first",
+            ),
+            (
+                GuideError::NoSteps {
+                    file: String::new(),
+                    field: String::new(),
+                    message: String::new(),
+                },
+                "no_steps",
+            ),
+            (
+                GuideError::NoArchitecture {
+                    file: String::new(),
+                    field: String::new(),
+                    message: String::new(),
+                },
+                "no_architecture",
+            ),
+            (
+                GuideError::UnlistedSlide {
+                    file: String::new(),
+                    field: String::new(),
+                    message: String::new(),
+                },
+                "unlisted_slide",
+            ),
+            (
+                GuideError::DuplicateBlockId {
+                    file: String::new(),
+                    field: String::new(),
+                    message: String::new(),
+                },
+                "duplicate_block_id",
+            ),
+            (
+                GuideError::FlagBlockUnknown {
+                    file: String::new(),
+                    field: String::new(),
+                    message: String::new(),
+                },
+                "flag_block_unknown",
+            ),
+            (
+                GuideError::FlagLineOutOfRange {
+                    file: String::new(),
+                    field: String::new(),
+                    message: String::new(),
+                },
+                "flag_line_out_of_range",
+            ),
         ];
-        assert_eq!(cases.len(), 23);
+        assert_eq!(cases.len(), 33);
         for (error, code) in &cases {
             assert_eq!(error.code(), *code);
         }
+        let unknown = GuideError::DraftUnknown("x".into());
+        assert_eq!(unknown.code(), "draft_unknown");
+        assert_eq!(unknown.file(), None);
+        assert_eq!(unknown.field(), None);
+        let flagged = GuideError::NoSteps {
+            file: "guide.yaml".into(),
+            field: "slides".into(),
+            message: "m".into(),
+        };
+        assert_eq!(flagged.file(), Some("guide.yaml"));
+        assert_eq!(flagged.field(), Some("slides"));
         let located = GuideError::HtmlNotAllowed {
             file: "slides/s1.md".into(),
             field: "body".into(),
