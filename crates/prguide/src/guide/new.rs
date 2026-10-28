@@ -123,9 +123,9 @@ mod tests {
     use super::*;
     use crate::guide::parse::parse_manifest;
 
-    /// m1 DEL and C1 controls survive a render and parse round trip.
+    /// m1 DEL, C1 controls, U+FFFE and U+FFFF survive a render and parse round trip.
     #[test]
-    fn quote_escapes_del_and_c1_controls() {
+    fn quote_escapes_yaml_non_printables() {
         let nasty = "a\u{7f}b\u{85}c\u{9b}d\u{80}e\u{9f}f\u{fffe}g\u{ffff}";
         let p = Provenance {
             format: "prguide/v1".into(),
