@@ -2019,7 +2019,7 @@ fn gitlink_pair_and_symlink_file_pair_warn() {
 
 #[test]
 fn resume_restores_tracked_files_renamed_to_nfd_outside_git() {
-    let mut ctx = Ctx::from_shape(index_shape(&[
+    let ctx = Ctx::from_shape(index_shape(&[
         (NFC, "nfc\n"),
         ("r\u{e9}sum\u{e9}/a.md", "in dir\n"),
     ]));
