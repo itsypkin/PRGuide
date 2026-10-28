@@ -1790,3 +1790,59 @@ fn row_commits_kind_without_commits_is_internal() {
         "internal error: the drafts row's provenance_json has selection kind commits but no commits",
     );
 }
+
+/// X3 stdout_write_failure_is_internal: stdout is a pipe with no reader, so the
+/// report cannot be written; the error goes to stderr as `internal`, exit 1.
+#[test]
+fn stdout_write_failure_is_internal() {
+    let ctx = Ctx::live();
+    ctx.valid();
+    let home = ctx.fx.path().join("home");
+    // A pipe with no reader: every write fails with EPIPE.
+    let (r, w) = std::io::pipe().unwrap();
+    drop(r);
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_prguide"))
+        .current_dir(&ctx.clone)
+        .arg("check")
+        .arg(&ctx.draft)
+        .args(["--run", &ctx.run])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
+        .env("PRGUIDE_HOME", &ctx.home)
+        .stdout(std::process::Stdio::from(w))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let line = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(line.lines().count(), 1);
+    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(v["code"], "internal");
+}
+
+/// X4 missing_store_meta_is_internal: a store_meta row is gone.
+#[test]
+fn missing_store_meta_is_internal() {
+    let ctx = Ctx::new();
+    ctx.valid();
+    ctx.store()
+        .tx(|tx| -> Result<(), StoreError> {
+            tx.execute("DELETE FROM store_meta WHERE key = 'repo'", ())?;
+            Ok(())
+        })
+        .unwrap();
+    let err = ctx.check_path(&ctx.draft).unwrap_err();
+    assert_eq!(err.code(), "internal");
+    assert_eq!(err.to_string(), "internal error: store_meta has no `repo`");
+}
+
+/// X5 missing_parent_is_draft_unknown: the draft's parent does not exist.
+#[test]
+fn missing_parent_is_draft_unknown() {
+    let ctx = Ctx::new();
+    ctx.valid();
+    let tmp = TempDir::new().unwrap();
+    let err = ctx.check_path(&tmp.path().join("nope/x")).unwrap_err();
+    assert_eq!(err.code(), "draft_unknown");
+}
