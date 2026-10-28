@@ -1983,6 +1983,18 @@ fn groups_of_three_nested_and_directory_collisions_are_sorted() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn names_containing_a_tab_are_still_checked_for_collisions() {
+    assert_insensitive_tmp(true);
+    let ctx = Ctx::from_shape(index_shape(&[("a\tb.md", "1\n"), ("A\tb.md", "2\n")]));
+    let out = ctx.ok();
+    assert_eq!(
+        warnings_json(&out),
+        expected_warnings(&[&["A\tb.md", "a\tb.md"]])
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn resume_warns_after_the_reset_and_clears_when_the_pair_is_gone() {
     assert_insensitive_tmp(true);
     let mut ctx = Ctx::from_shape(index_shape(&[("a.txt", "a\n")]));
