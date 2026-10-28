@@ -1,0 +1,5 @@
+---
+source: crates/prguide/tests/github_post.rs
+expression: "String::from_utf8(stdin.clone()).unwrap()"
+---
+{"commit_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","body":"Review notes \"q\" é <a>\n<!-- prguide:01JTEST -->","event":"COMMENT","comments":[{"path":"src/a.rs","body":"one","line":12,"side":"RIGHT"},{"path":"src/b.rs","body":"range","line":20,"side":"LEFT","start_line":15,"start_side":"LEFT"},{"path":"src/c.rs","body":"mixed","line":9,"side":"RIGHT","start_line":7,"start_side":"RIGHT"}]}

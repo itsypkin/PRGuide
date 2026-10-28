@@ -103,6 +103,63 @@ pub struct Commit {
     pub author: CommitAuthor,
 }
 
+/// The only review event prguide can send: it can never approve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum ReviewEvent {
+    #[serde(rename = "COMMENT")]
+    Comment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum ReviewSide {
+    #[serde(rename = "LEFT")]
+    Left,
+    #[serde(rename = "RIGHT")]
+    Right,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ReviewComment {
+    pub path: String,
+    pub body: String,
+    pub line: u32,
+    pub side: ReviewSide,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_side: Option<ReviewSide>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ReviewRequest {
+    pub commit_id: String,
+    pub body: String,
+    pub event: ReviewEvent,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<ReviewComment>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct ReviewCreated {
+    pub id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Review {
+    pub id: u64,
+    pub body: String,
+    pub commit_id: Option<String>,
+    pub submitted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PostedComment {
+    pub id: u64,
+    pub path: String,
+    pub line: Option<u32>,
+    pub body: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GitHubError {
     #[error("prguide v1 supports only github.com, not {host}")]
@@ -121,6 +178,10 @@ pub enum GitHubError {
     PrTooLarge { repo: String, number: u64 },
     #[error("gh failed (exit {}): {stderr}", status.map_or_else(|| "signal".to_owned(), |status| status.to_string()))]
     GhFailed { status: Option<i32>, stderr: String },
+    #[error("GitHub rejected the review (HTTP {status}): {message}")]
+    GhRejected { status: u16, message: String },
+    #[error("GitHub's answer to the review is unknown ({reason}); it may have been posted")]
+    GhUnknownOutcome { reason: String },
 }
 
 impl GitHubError {
@@ -133,6 +194,8 @@ impl GitHubError {
             Self::PrNotFound { .. } => "pr_not_found",
             Self::PrTooLarge { .. } => "pr_too_large",
             Self::GhFailed { .. } => "gh_failed",
+            Self::GhRejected { .. } => "gh_rejected",
+            Self::GhUnknownOutcome { .. } => "gh_unknown_outcome",
         }
     }
 }
@@ -150,12 +213,26 @@ pub fn check_commit_count(repo: &Repo, number: u64, count: usize) -> Result<(), 
 pub trait GitHub: Send + Sync {
     fn pr(&self, repo: &Repo, number: u64) -> Result<Pr, GitHubError>;
     fn commits(&self, repo: &Repo, number: u64) -> Result<Vec<Commit>, GitHubError>;
+    fn create_review(
+        &self,
+        repo: &Repo,
+        number: u64,
+        request: &ReviewRequest,
+    ) -> Result<ReviewCreated, GitHubError>;
+    fn review_comments(
+        &self,
+        repo: &Repo,
+        number: u64,
+        review_id: u64,
+    ) -> Result<Vec<PostedComment>, GitHubError>;
+    fn list_reviews(&self, repo: &Repo, number: u64) -> Result<Vec<Review>, GitHubError>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// U4 codes are stable and convert.
     #[test]
     fn codes_are_stable_and_convert() {
         let errors = [
@@ -182,6 +259,11 @@ mod tests {
                 status: Some(1),
                 stderr: String::new(),
             },
+            GitHubError::GhRejected {
+                status: 422,
+                message: "m".into(),
+            },
+            GitHubError::GhUnknownOutcome { reason: "r".into() },
         ];
         let codes = [
             "unsupported_host",
@@ -191,10 +273,24 @@ mod tests {
             "pr_not_found",
             "pr_too_large",
             "gh_failed",
+            "gh_rejected",
+            "gh_unknown_outcome",
         ];
         for (error, code) in errors.into_iter().zip(codes) {
             assert_eq!(error.code(), code);
             assert_eq!(crate::error::Error::from(error).code(), code);
         }
+        assert_eq!(
+            GitHubError::GhRejected {
+                status: 422,
+                message: "m".into()
+            }
+            .to_string(),
+            "GitHub rejected the review (HTTP 422): m"
+        );
+        assert_eq!(
+            GitHubError::GhUnknownOutcome { reason: "r".into() }.to_string(),
+            "GitHub's answer to the review is unknown (r); it may have been posted"
+        );
     }
 }

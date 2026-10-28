@@ -1,8 +1,15 @@
 #!/bin/sh
 # Fake `gh` for prguide's tests. It never touches the network.
-# It appends its arguments, one per line, to $FAKE_GH_DIR/args, writes
-# $FAKE_GH_DIR/stdout and $FAKE_GH_DIR/stderr (when present) to its stdout
-# and stderr, and exits with the number in $FAKE_GH_DIR/exit (default 0).
+# It appends its arguments, one per line, to $FAKE_GH_DIR/args, copies its
+# stdin to $FAKE_GH_DIR/stdin (unless $FAKE_GH_DIR/noread exists), sleeps
+# $FAKE_GH_DIR/delay seconds (when present), writes $FAKE_GH_DIR/stdout and
+# $FAKE_GH_DIR/stderr (when present) to its stdout and stderr, and exits with
+# the number in $FAKE_GH_DIR/exit (default 0). With $FAKE_GH_DIR/hang it
+# writes its PID to $FAKE_GH_DIR/pid and execs sleep 30 instead of exiting
+# (exec, so a kill of that PID closes its pipes). With $FAKE_GH_DIR/hangchild
+# it writes its PID to $FAKE_GH_DIR/pid and runs sleep 30 as a child (a kill
+# of that PID leaves the child holding the pipes). With $FAKE_GH_DIR/selfkill
+# it kills itself with SIGKILL.
 PATH=/usr/bin:/bin
 export PATH
 dir=${FAKE_GH_DIR:?FAKE_GH_DIR is not set}
@@ -11,8 +18,13 @@ for arg in "$@"; do
 done >> "$dir/args"
 printf '%s\n' "${GH_FORCE_TTY-unset}" > "$dir/gh_force_tty"
 printf '%s\n' "${CLICOLOR_FORCE-unset}" > "$dir/clicolor_force"
+if [ ! -f "$dir/noread" ]; then cat > "$dir/stdin"; fi
+if [ -f "$dir/delay" ]; then sleep "$(cat "$dir/delay")"; fi
 if [ -f "$dir/stdout" ]; then cat "$dir/stdout"; fi
 if [ -f "$dir/stderr" ]; then cat "$dir/stderr" >&2; fi
+if [ -f "$dir/hang" ]; then echo $$ > "$dir/pid"; exec sleep 30; fi
+if [ -f "$dir/hangchild" ]; then echo $$ > "$dir/pid"; sleep 30; fi
+if [ -f "$dir/selfkill" ]; then kill -KILL $$; fi
 code=0
 if [ -f "$dir/exit" ]; then code=$(cat "$dir/exit"); fi
 exit "$code"
