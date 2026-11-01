@@ -2014,7 +2014,7 @@ use std::cell::RefCell;
 
 use prguide::{
     guide::{
-        check::{CAP_HEIGHT, CAP_WIDTH, PREVIEW_LINES, REFERENCE_WIDTH, check_diagrams_with},
+        check::{PREVIEW_LINES, check_diagrams_with},
         parse::parse_slide,
     },
     render::{
