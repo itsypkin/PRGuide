@@ -49,4 +49,19 @@ fn quiet_hook_silences_only_render_panics() {
     );
     assert!(render(F15).is_err());
     assert_eq!(seen().len(), 2);
+    let before = seen().len();
+    assert!(matches!(
+        render("graph TD\n  A --> \n  ]]] [[\n"),
+        Err(RenderError::Invalid(_))
+    ));
+    let _ = catch_unwind(|| panic!("after-invalid"));
+    assert_eq!(seen().len(), before + 1);
+    assert_eq!(seen().last().map(String::as_str), Some("after-invalid"));
+    assert!(matches!(
+        render("pie title X\n  \"a\" : 1\n"),
+        Err(RenderError::Unsupported(_))
+    ));
+    let _ = catch_unwind(|| panic!("after-unsupported"));
+    assert_eq!(seen().len(), before + 2);
+    assert_eq!(seen().last().map(String::as_str), Some("after-unsupported"));
 }

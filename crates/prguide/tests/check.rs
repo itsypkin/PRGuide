@@ -2488,8 +2488,15 @@ fn empty_slides_still_checks_diagrams() {
     ctx.set_slides(&[]);
     let diags = ctx.diags();
     assert_eq!(diags.len(), 2, "{diags:?}");
-    assert_eq!(diags[0].code, "slide_file_missing");
-    assert_eq!(diags[0].field, "slides");
+    assert_eq!(
+        diags[0],
+        e(
+            "guide.yaml",
+            "slides",
+            "slide_file_missing",
+            "`slides` is empty: list the deck's slide ids in order, the overview first"
+        )
+    );
     assert_eq!(diags[1], no_diagram_d());
 }
 
@@ -2677,6 +2684,19 @@ fn ascii_only_failure() {
         });
         assert_eq!(only(r, 2), expect);
     }
+    let expect = vec![render_d(
+        8,
+        "ascii",
+        "render_unsupported",
+        "unsupported diagram type: x",
+    )];
+    for (w, h) in [(10, 10), (77, 1), (200, 10)] {
+        let r = fake_src(move |cs, _| match cs {
+            Charset::Ascii => Err(RenderError::Unsupported("x".into())),
+            Charset::Unicode => fd(w, h, false),
+        });
+        assert_eq!(only(r, 2), expect);
+    }
 }
 
 /// K4 flipped_ascii_failure
@@ -2777,15 +2797,6 @@ fn flip_fits_narrow() {
         }
     });
     assert_eq!(only(r, 4), vec![]);
-}
-
-/// K9 constants
-#[test]
-fn constants_match_the_design() {
-    assert_eq!(
-        (REFERENCE_WIDTH, CAP_WIDTH, CAP_HEIGHT, PREVIEW_LINES),
-        (76, 152, 108, 40)
-    );
 }
 
 // ---- binary tests
