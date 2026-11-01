@@ -839,14 +839,16 @@ fn binary_detached_child_does_not_hold_prguides_output() {
 }
 #[test]
 fn binary_detached_child_keeps_writing_after_prguide_exits() {
+    use std::os::unix::fs::MetadataExt;
     let (home, run) = setup_binary();
     let temp = tempfile::tempdir().expect("temp");
     let pid_path = temp.path().join("pid");
     let count = temp.path().join("count");
+    // sh truncates before it writes, so a read could see it empty; a rename publishes it whole.
     write_config(
         home.path(),
         &command_value(format!(
-            "echo $$ > {0}; i=0; while [ $i -lt 300 ]; do i=$((i+1)); echo \"line $i\" >&2; echo $i > {1}; sleep 0.05; done",
+            "echo $$ > {0}; i=0; while [ $i -lt 300 ]; do i=$((i+1)); echo \"line $i\" >&2; echo $i > {1}.tmp && mv {1}.tmp {1}; sleep 0.05; done",
             pid_path.display(),
             count.display()
         )),
@@ -864,6 +866,8 @@ fn binary_detached_child_keeps_writing_after_prguide_exits() {
         .trim()
         .parse()
         .expect("number");
+    // Holding the file keeps its inode number from being reused.
+    let held = fs::File::open(&count).expect("hold count");
     thread::sleep(Duration::from_secs(1));
     let second: i32 = fs::read_to_string(&count)
         .expect("count")
@@ -871,16 +875,29 @@ fn binary_detached_child_keeps_writing_after_prguide_exits() {
         .parse()
         .expect("number");
     assert!(second > first && alive(&pid));
+    let held = held.metadata().expect("held metadata");
+    let now = fs::metadata(&count).expect("count metadata");
+    assert!(
+        (held.dev(), held.ino()) != (now.dev(), now.ino()),
+        "count must be replaced by a rename, not rewritten in place"
+    );
 }
 #[test]
 fn binary_child_survives_a_kill_of_prguides_process_group() {
+    use std::os::unix::fs::MetadataExt;
     let (home, run) = setup_binary();
     let temp = tempfile::tempdir().expect("temp");
     let pid_path = temp.path().join("pid");
+    // sh truncates before it writes, so a read could see it empty; a rename publishes it whole.
     write_config(
         home.path(),
-        &command_value(format!("echo $$ > {}; exec sleep 20", pid_path.display())),
+        &command_value(format!(
+            "echo $$ > {0}.tmp && mv {0}.tmp {0}; exec sleep 20",
+            pid_path.display()
+        )),
     );
+    // Pre-create pid.tmp and hold it: the shell's `>` refills this inode, so only a rename gives `pid` the same one.
+    let held = fs::File::create(temp.path().join("pid.tmp")).expect("pid.tmp");
     let mut command = binary(home.path(), &run, temp.path());
     command.process_group(0);
     let mut child = command.spawn().expect("spawn");
@@ -890,6 +907,17 @@ fn binary_child_survives_a_kill_of_prguides_process_group() {
         .trim()
         .to_owned();
     let _guard = KillOnDrop(Some(pid.clone()));
+    assert!(
+        !temp.path().join("pid.tmp").exists(),
+        "pid must be published by a rename, leaving no pid.tmp"
+    );
+    let held = held.metadata().expect("held metadata");
+    let now = fs::metadata(&pid_path).expect("pid metadata");
+    assert_eq!(
+        (held.dev(), held.ino()),
+        (now.dev(), now.ino()),
+        "pid must be the renamed pid.tmp"
+    );
     assert_ne!(pgid(&pid), child.id().to_string());
     Command::new("kill")
         .args(["-KILL", "--", &format!("-{}", child.id())])
