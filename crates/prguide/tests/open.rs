@@ -839,6 +839,7 @@ fn binary_detached_child_does_not_hold_prguides_output() {
 }
 #[test]
 fn binary_detached_child_keeps_writing_after_prguide_exits() {
+    use std::os::unix::fs::MetadataExt;
     let (home, run) = setup_binary();
     let temp = tempfile::tempdir().expect("temp");
     let pid_path = temp.path().join("pid");
@@ -865,6 +866,8 @@ fn binary_detached_child_keeps_writing_after_prguide_exits() {
         .trim()
         .parse()
         .expect("number");
+    // Holding the file keeps its inode number from being reused.
+    let held = fs::File::open(&count).expect("hold count");
     thread::sleep(Duration::from_secs(1));
     let second: i32 = fs::read_to_string(&count)
         .expect("count")
@@ -872,6 +875,12 @@ fn binary_detached_child_keeps_writing_after_prguide_exits() {
         .parse()
         .expect("number");
     assert!(second > first && alive(&pid));
+    let held = held.metadata().expect("held metadata");
+    let now = fs::metadata(&count).expect("count metadata");
+    assert!(
+        (held.dev(), held.ino()) != (now.dev(), now.ino()),
+        "count must be replaced by a rename, not rewritten in place"
+    );
 }
 #[test]
 fn binary_child_survives_a_kill_of_prguides_process_group() {
@@ -894,6 +903,10 @@ fn binary_child_survives_a_kill_of_prguides_process_group() {
         .expect("pid")
         .trim()
         .to_owned();
+    assert!(
+        !temp.path().join("pid.tmp").exists(),
+        "pid must be published by a rename, leaving no pid.tmp"
+    );
     let _guard = KillOnDrop(Some(pid.clone()));
     assert_ne!(pgid(&pid), child.id().to_string());
     Command::new("kill")
