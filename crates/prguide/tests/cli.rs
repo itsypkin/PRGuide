@@ -39,19 +39,6 @@ fn not_implemented(command: &mut Command, message: &str) {
 #[test]
 fn every_command_parses_required_and_optional_arguments() {
     let cases: &[(&[&str], &str)] = &[
-        (&["guide", "commit", "d.md", "--run", "r_x"], "guide commit"),
-        (
-            &[
-                "guide",
-                "commit",
-                "d.md",
-                "--run",
-                "r_x",
-                "--caused-by",
-                "e_1",
-            ],
-            "guide commit",
-        ),
         (&["show", "e_1", "--run", "r_x"], "show"),
         (
             &[
@@ -164,6 +151,29 @@ fn every_command_parses_required_and_optional_arguments() {
         let mut command = command();
         command.args(["view", "--run", "r_x"]);
         not_implemented(&mut command, "viewer");
+    }
+}
+
+/// `guide commit` is implemented: it parses both argument shapes and reaches the store.
+#[test]
+fn guide_commit_parses_its_arguments_and_reaches_the_store() {
+    let home = tempfile::TempDir::new().unwrap();
+    for args in [
+        &["guide", "commit", "d.md", "--run", "r_x"][..],
+        &[
+            "guide",
+            "commit",
+            "d.md",
+            "--run",
+            "r_x",
+            "--caused-by",
+            "e_1",
+        ][..],
+    ] {
+        let mut command = command();
+        command.args(args).env("PRGUIDE_HOME", home.path());
+        let value = error_result(&mut command);
+        assert_eq!(value["code"], "run_unknown");
     }
 }
 

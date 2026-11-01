@@ -3,16 +3,16 @@
 
 use std::{
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
 use crate::{
     Error,
-    git::{Git, GitError},
+    git::{Git, GitError, RepoClone},
     guide::{
         GuideError,
-        check::{CheckReport, check_draft, draft_path, draft_row, store_binding},
+        check::{CheckReport, DraftRow, check_draft, draft_path, draft_row, store_binding},
     },
     store::{Clock, Store, SystemClock, prguide_home, runs},
 };
@@ -31,38 +31,57 @@ pub struct CheckEnv {
     pub clock: Arc<dyn Clock>,
 }
 
-/// Steps 2 to 7 of the failure order, then `check_draft`. Never prints.
-pub fn check(env: &CheckEnv, args: &CheckArgs) -> Result<CheckReport, Error> {
-    let run_id = runs::RunId::new(&args.run);
-    let mut store = Store::open_for_run(&env.home, &run_id)?.with_clock(Arc::clone(&env.clock));
-    runs::require_active(&mut store, &run_id)?;
+/// A draft resolved against its run, its store and the current clone.
+pub(crate) struct ResolvedDraft {
+    pub row: DraftRow,
+    pub clone: RepoClone,
+}
+
+/// The run gate, the drafts row and the store binding, in `check`'s order.
+/// `command` names the calling command in the `store_bound` message.
+pub(crate) fn resolve_draft(
+    store: &mut Store,
+    git: &Git,
+    run_id: &runs::RunId,
+    draft: &Path,
+    command: &str,
+) -> Result<ResolvedDraft, Error> {
+    runs::require_active(store, run_id)?;
     let unknown = || {
         GuideError::DraftUnknown(format!(
             "{:?} is not a draft of run {}: pass the `draft` path that prguide guide new \
              printed for this run",
-            args.draft, args.run
+            draft, run_id
         ))
     };
-    let path = draft_path(&args.draft, env.git.dir()).ok_or_else(unknown)?;
+    let path = draft_path(draft, git.dir()).ok_or_else(unknown)?;
     let (row, (owner, repo, bound)) = store.tx(|tx| {
-        let row = draft_row(tx, &run_id, &path)?.ok_or_else(unknown)?;
+        let row = draft_row(tx, run_id, &path)?.ok_or_else(unknown)?;
         Ok::<_, Error>((row, store_binding(tx)?))
     })?;
     let n = store.pr().number();
-    drop(store);
-    let clone = env.git.discover()?;
+    let clone = git.discover()?;
     let current = clone.common_dir.to_string_lossy().into_owned();
     if current != bound {
         return Err(GuideError::StoreBound(format!(
             "the store for {owner}/{repo}#{n} is bound to the clone whose git dir is {bound}; \
-             this clone's git dir is {current}. Run prguide check from the bound clone"
+             this clone's git dir is {current}. Run {command} from the bound clone"
         ))
         .into());
     }
+    Ok(ResolvedDraft { row, clone })
+}
+
+/// Steps 2 to 7 of the failure order, then `check_draft`. Never prints.
+pub fn check(env: &CheckEnv, args: &CheckArgs) -> Result<CheckReport, Error> {
+    let run_id = runs::RunId::new(&args.run);
+    let mut store = Store::open_for_run(&env.home, &run_id)?.with_clock(Arc::clone(&env.clock));
+    let resolved = resolve_draft(&mut store, &env.git, &run_id, &args.draft, "prguide check")?;
+    drop(store);
     check_draft(
-        &env.git.with_dir(&clone.toplevel),
-        std::path::Path::new(&row.path),
-        &row.provenance_json,
+        &env.git.with_dir(&resolved.clone.toplevel),
+        Path::new(&resolved.row.path),
+        &resolved.row.provenance_json,
     )
 }
 
