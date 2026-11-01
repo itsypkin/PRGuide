@@ -225,6 +225,36 @@ pub enum GuideError {
     },
     #[error("{0}")]
     DraftUnknown(String),
+    #[error("{message}")]
+    NoDiagram {
+        file: String,
+        field: String,
+        message: String,
+    },
+    #[error("{message}")]
+    DiagramRender {
+        file: String,
+        field: String,
+        message: String,
+    },
+    #[error("{message}")]
+    DiagramWide {
+        file: String,
+        field: String,
+        message: String,
+    },
+    #[error("{message}")]
+    DiagramTooLarge {
+        file: String,
+        field: String,
+        message: String,
+    },
+    #[error("{message}")]
+    UnsupportedNeedsText {
+        file: String,
+        field: String,
+        message: String,
+    },
 }
 
 impl GuideError {
@@ -270,6 +300,11 @@ impl GuideError {
             Self::FlagBlockUnknown { .. } => "flag_block_unknown",
             Self::FlagLineOutOfRange { .. } => "flag_line_out_of_range",
             Self::DraftUnknown(_) => "draft_unknown",
+            Self::NoDiagram { .. } => "no_diagram",
+            Self::DiagramRender { .. } => "diagram_render",
+            Self::DiagramWide { .. } => "diagram_wide",
+            Self::DiagramTooLarge { .. } => "diagram_too_large",
+            Self::UnsupportedNeedsText { .. } => "unsupported_needs_text",
         }
     }
 
@@ -324,7 +359,12 @@ impl GuideError {
             | Self::UnlistedSlide { file, field, .. }
             | Self::DuplicateBlockId { file, field, .. }
             | Self::FlagBlockUnknown { file, field, .. }
-            | Self::FlagLineOutOfRange { file, field, .. } => Some((file, field)),
+            | Self::FlagLineOutOfRange { file, field, .. }
+            | Self::NoDiagram { file, field, .. }
+            | Self::DiagramRender { file, field, .. }
+            | Self::DiagramWide { file, field, .. }
+            | Self::DiagramTooLarge { file, field, .. }
+            | Self::UnsupportedNeedsText { file, field, .. } => Some((file, field)),
         }
     }
 }
@@ -625,8 +665,48 @@ mod tests {
                 },
                 "flag_line_out_of_range",
             ),
+            (
+                GuideError::NoDiagram {
+                    file: String::new(),
+                    field: String::new(),
+                    message: String::new(),
+                },
+                "no_diagram",
+            ),
+            (
+                GuideError::DiagramRender {
+                    file: String::new(),
+                    field: String::new(),
+                    message: String::new(),
+                },
+                "diagram_render",
+            ),
+            (
+                GuideError::DiagramWide {
+                    file: String::new(),
+                    field: String::new(),
+                    message: String::new(),
+                },
+                "diagram_wide",
+            ),
+            (
+                GuideError::DiagramTooLarge {
+                    file: String::new(),
+                    field: String::new(),
+                    message: String::new(),
+                },
+                "diagram_too_large",
+            ),
+            (
+                GuideError::UnsupportedNeedsText {
+                    file: String::new(),
+                    field: String::new(),
+                    message: String::new(),
+                },
+                "unsupported_needs_text",
+            ),
         ];
-        assert_eq!(cases.len(), 33);
+        assert_eq!(cases.len(), 38);
         for (error, code) in &cases {
             assert_eq!(error.code(), *code);
         }
