@@ -884,6 +884,7 @@ fn binary_detached_child_keeps_writing_after_prguide_exits() {
 }
 #[test]
 fn binary_child_survives_a_kill_of_prguides_process_group() {
+    use std::os::unix::fs::MetadataExt;
     let (home, run) = setup_binary();
     let temp = tempfile::tempdir().expect("temp");
     let pid_path = temp.path().join("pid");
@@ -895,6 +896,8 @@ fn binary_child_survives_a_kill_of_prguides_process_group() {
             pid_path.display()
         )),
     );
+    // Pre-create pid.tmp and hold it: the shell's `>` refills this inode, so only a rename gives `pid` the same one.
+    let held = fs::File::create(temp.path().join("pid.tmp")).expect("pid.tmp");
     let mut command = binary(home.path(), &run, temp.path());
     command.process_group(0);
     let mut child = command.spawn().expect("spawn");
@@ -903,11 +906,18 @@ fn binary_child_survives_a_kill_of_prguides_process_group() {
         .expect("pid")
         .trim()
         .to_owned();
+    let _guard = KillOnDrop(Some(pid.clone()));
     assert!(
         !temp.path().join("pid.tmp").exists(),
         "pid must be published by a rename, leaving no pid.tmp"
     );
-    let _guard = KillOnDrop(Some(pid.clone()));
+    let held = held.metadata().expect("held metadata");
+    let now = fs::metadata(&pid_path).expect("pid metadata");
+    assert_eq!(
+        (held.dev(), held.ino()),
+        (now.dev(), now.ino()),
+        "pid must be the renamed pid.tmp"
+    );
     assert_ne!(pgid(&pid), child.id().to_string());
     Command::new("kill")
         .args(["-KILL", "--", &format!("-{}", child.id())])
