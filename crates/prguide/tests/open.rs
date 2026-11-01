@@ -843,10 +843,11 @@ fn binary_detached_child_keeps_writing_after_prguide_exits() {
     let temp = tempfile::tempdir().expect("temp");
     let pid_path = temp.path().join("pid");
     let count = temp.path().join("count");
+    // sh truncates before it writes, so a read could see it empty; a rename publishes it whole.
     write_config(
         home.path(),
         &command_value(format!(
-            "echo $$ > {0}; i=0; while [ $i -lt 300 ]; do i=$((i+1)); echo \"line $i\" >&2; echo $i > {1}; sleep 0.05; done",
+            "echo $$ > {0}; i=0; while [ $i -lt 300 ]; do i=$((i+1)); echo \"line $i\" >&2; echo $i > {1}.tmp && mv {1}.tmp {1}; sleep 0.05; done",
             pid_path.display(),
             count.display()
         )),
@@ -877,9 +878,13 @@ fn binary_child_survives_a_kill_of_prguides_process_group() {
     let (home, run) = setup_binary();
     let temp = tempfile::tempdir().expect("temp");
     let pid_path = temp.path().join("pid");
+    // sh truncates before it writes, so a read could see it empty; a rename publishes it whole.
     write_config(
         home.path(),
-        &command_value(format!("echo $$ > {}; exec sleep 20", pid_path.display())),
+        &command_value(format!(
+            "echo $$ > {0}.tmp && mv {0}.tmp {0}; exec sleep 20",
+            pid_path.display()
+        )),
     );
     let mut command = binary(home.path(), &run, temp.path());
     command.process_group(0);
