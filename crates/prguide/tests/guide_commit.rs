@@ -1505,6 +1505,35 @@ fn versions_api_lists_ready_versions() {
         .unwrap();
     let err = store.tx(|tx| versions::ready(tx, &dir)).unwrap_err();
     assert_eq!(err.code(), "store_sqlite");
+
+    // Strict parsing: an unknown ref field and malformed commits both fail.
+    let bad = [
+        (r#"[{"name":"n","sha":"s","extra":true}]"#, "[]"),
+        ("[]", "x"),
+        ("[]", "[1]"),
+    ];
+    for (refs_json, commits_json) in bad {
+        let mut ctx = Ctx::new();
+        let mut store = ctx.store();
+        let dir = store.dir().to_path_buf();
+        store
+            .tx(|tx| {
+                tx.execute(
+                    "INSERT INTO guide_versions (version, state, caused_by, snapshot_base, \
+                     snapshot_head, selection_kind, selection_base, selection_head, \
+                     commits_json, refs_json, created_at, ready_at) VALUES (1, 'ready', NULL, \
+                     'a', 'b', 'full', 'c', 'd', ?1, ?2, 't', 'r')",
+                    rusqlite::params![commits_json, refs_json],
+                )?;
+                Ok::<_, StoreError>(())
+            })
+            .unwrap();
+        let err = store.tx(|tx| versions::ready(tx, &dir)).unwrap_err();
+        assert_eq!(err.code(), "store_sqlite", "{refs_json} {commits_json}");
+        let err = store.tx(|tx| versions::get(tx, &dir, 1)).unwrap_err();
+        assert_eq!(err.code(), "store_sqlite", "{refs_json} {commits_json}");
+        let _ = &mut ctx;
+    }
 }
 
 fn relative(from: &Path, to: &Path) -> PathBuf {

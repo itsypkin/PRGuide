@@ -264,10 +264,20 @@ fn io(path: &Path) -> impl Fn(std::io::Error) -> StoreError + '_ {
 /// row. Never touches `guides/`.
 pub fn rollback(store: &mut Store, git: &Git, k: i64, refs: &[PinnedRef]) -> Result<(), Error> {
     let staging = staging_dir(store.dir(), k);
-    match fs::remove_dir_all(&staging) {
-        Ok(()) => {}
-        Err(e) if e.kind() == ErrorKind::NotFound => {}
-        Err(e) => return Err(io(&staging)(e).into()),
+    // Only remove through a real `staging/` directory: removing through a
+    // symlinked parent would delete data outside the store.
+    let parent = store.dir().join("staging");
+    let parent_is_real = match fs::symlink_metadata(&parent) {
+        Ok(meta) => meta.is_dir(),
+        Err(e) if e.kind() == ErrorKind::NotFound => false,
+        Err(e) => return Err(io(&parent)(e).into()),
+    };
+    if parent_is_real {
+        match fs::remove_dir_all(&staging) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(io(&staging)(e).into()),
+        }
     }
     fault_point!(RollbackAfterDir);
     let names: Vec<String> = refs.iter().map(|r| r.name.clone()).collect();

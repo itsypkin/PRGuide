@@ -143,7 +143,9 @@ fn reserve(
     caused_by: Option<&str>,
     prov: &Prov,
 ) -> Result<Reserved, Error> {
-    match runs::gate(tx, store.now, run_id)? {
+    // Sampled inside the transaction, after any wait for the write lock.
+    let now = store.clock.now();
+    match runs::gate(tx, now, run_id)? {
         RunGate::Stopped(run) => return Ok(Reserved::Stopped(run.id.to_string())),
         RunGate::Active(_) => {}
     }
@@ -260,7 +262,7 @@ fn reserve(
             prov.selection.head,
             commits_json,
             refs_json,
-            store.now.to_rfc3339(),
+            now.to_rfc3339(),
         ],
     )
     .map_err(StoreError::from)?;
@@ -270,7 +272,7 @@ fn reserve(
 struct StoreFacts {
     dir: std::path::PathBuf,
     number: u64,
-    now: crate::store::Timestamp,
+    clock: std::sync::Arc<dyn crate::store::Clock>,
 }
 
 const CHANGED: &str = "changed while it was being copied";
@@ -485,7 +487,7 @@ pub fn commit(
     let facts = StoreFacts {
         dir: store_dir.clone(),
         number: store.pr().number(),
-        now: store.now(),
+        clock: store.clock(),
     };
     let reserved = store.tx(|tx| reserve(tx, &facts, run_id, caused_by, &prov))?;
     let (k, refs) = match reserved {
@@ -1562,12 +1564,19 @@ mod tests {
         let mut h = H::new();
         let outside = h.root.join("outside");
         fs::create_dir(&outside).unwrap();
+        fs::create_dir(outside.join("v1")).unwrap();
+        fs::write(outside.join("v1/keep.txt"), "k").unwrap();
         symlink(&outside, h.store.dir().join("staging")).unwrap();
         let err = expect_err(h.commit(None));
         assert_eq!(err.code(), "store_io");
         assert!(err.to_string().contains("not a real directory"), "{err}");
-        h.nothing_left(1);
-        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+        assert_eq!(h.state_of(1), None);
+        assert!(h.refs(1).is_empty());
+        assert_eq!(h.notices(), 0);
+        assert!(h.lock_free());
+        assert_eq!(fs::read(outside.join("v1/keep.txt")).unwrap(), b"k");
+        drop(h.reopen());
+        assert_eq!(fs::read(outside.join("v1/keep.txt")).unwrap(), b"k");
 
         let mut h = H::new();
         let outside = h.root.join("outside");
@@ -1772,5 +1781,242 @@ mod tests {
         assert_eq!(fs::read(outside.join("keep.txt")).unwrap(), b"k");
         assert!(fs::symlink_metadata(h.published(1)).unwrap().is_dir());
         assert_eq!(tree(&h.published(1)), h.draft_tree());
+    }
+
+    // ---------------------------------------------------------------- lap 2
+
+    fn set_provenance(h: &mut H, f: impl FnOnce(&mut serde_json::Value)) {
+        let mut v: serde_json::Value = serde_json::from_str(&h.row.provenance_json).unwrap();
+        f(&mut v);
+        h.row.provenance_json = serde_json::to_string(&v).unwrap();
+    }
+
+    #[test]
+    fn rollback_never_removes_through_a_symlinked_staging_dir() {
+        let mut h = H::new();
+        crash_at(Point::AfterReserve);
+        expect_err(h.commit(None));
+        fault::clear();
+        let outside = h.root.join("outside");
+        fs::create_dir_all(outside.join("v1")).unwrap();
+        fs::write(outside.join("v1/keep.txt"), "k").unwrap();
+        symlink(&outside, h.store.dir().join("staging")).unwrap();
+        drop(h.reopen());
+        assert_eq!(h.state_of(1), None);
+        assert_eq!(fs::read(outside.join("v1/keep.txt")).unwrap(), b"k");
+    }
+
+    #[test]
+    fn the_reserve_gate_uses_the_time_after_the_write_lock_is_won() {
+        let mut h = H::new();
+        let blocker = h.raw();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let clock = Arc::clone(&h.clock);
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1000));
+            clock.advance(LEASE);
+            blocker.execute_batch("ROLLBACK").unwrap();
+        });
+        let err = expect_err(h.commit(None));
+        t.join().unwrap();
+        assert_eq!(err.code(), "run_stopped");
+        let state: String = h
+            .raw()
+            .query_row(
+                "SELECT state FROM runs WHERE id = ?1",
+                [h.run.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "expired");
+        no_trace(&h);
+    }
+
+    #[test]
+    fn provenance_errors_come_before_the_lock() {
+        let mut h = H::new();
+        h.row.provenance_json = "garbage".into();
+        let mut lock = versions::open_lock(h.store.dir()).unwrap();
+        let _held = lock.write().unwrap();
+        let err = expect_err(h.commit(None));
+        assert_eq!(err.code(), "internal");
+        assert!(
+            err.to_string()
+                .contains("the drafts row's provenance_json does not parse: "),
+            "{err}"
+        );
+        no_trace(&h);
+
+        let mut h = H::new();
+        set_provenance(&mut h, |v| {
+            v["selection"]["kind"] = "commits".into();
+            v["selection"]["commits"] = serde_json::json!([]);
+        });
+        let mut lock = versions::open_lock(h.store.dir()).unwrap();
+        let _held = lock.write().unwrap();
+        let err = expect_err(h.commit(None));
+        assert_eq!(err.code(), "internal");
+        assert!(
+            err.to_string().contains(
+                "the drafts row's provenance_json has selection kind commits but no commits"
+            ),
+            "{err}"
+        );
+        no_trace(&h);
+    }
+
+    fn done_event(h: &H, kind: Option<&str>, id: Option<&str>) {
+        h.raw()
+            .execute(
+                "UPDATE events SET state = 'done', result_kind = ?1, result_id = ?2, \
+                 done_at = 't' WHERE id = ?3",
+                rusqlite::params![kind, id, h.event],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn odd_done_events_are_reported() {
+        #[allow(clippy::type_complexity)]
+        let cases: [(Option<&str>, Option<&str>, &str, Option<&str>); 4] = [
+            (None, None, "store_sqlite", None),
+            (Some("guide_version"), None, "store_sqlite", None),
+            (Some("guide_version"), Some("x"), "store_sqlite", None),
+            (
+                Some("guide_version"),
+                Some("9"),
+                "internal",
+                Some("is done with guide version 9, which this store does not have"),
+            ),
+        ];
+        for (kind, id, code, text) in cases {
+            let mut h = H::new();
+            done_event(&h, kind, id);
+            let e = h.e();
+            let err = expect_err(h.commit(Some(&e)));
+            assert_eq!(err.code(), code, "{kind:?} {id:?}: {err}");
+            if let Some(text) = text {
+                assert_eq!(err.to_string(), format!("internal error: event {e} {text}"));
+            }
+            no_trace(&h);
+            assert_eq!(h.notices(), 0);
+            assert!(h.lock_free());
+        }
+    }
+
+    #[test]
+    fn an_empty_git_common_dir_leaves_staging_rows_alone() {
+        let h = H::new();
+        h.raw()
+            .execute(
+                "UPDATE store_meta SET value = '' WHERE key = 'git_common_dir'",
+                [],
+            )
+            .unwrap();
+        insert_row(&h, 1, "staging", "[]");
+        drop(h.reopen());
+        assert_eq!(h.state_of(1).as_deref(), Some("staging"));
+    }
+
+    #[test]
+    fn finish_refuses_an_absent_or_ready_row() {
+        let mut h = H::new();
+        let now = h.store.now();
+        let e = h.e();
+        let err = h
+            .store
+            .tx(|tx| versions::finish(tx, 1, Some(&e), now))
+            .unwrap_err();
+        assert!(err.to_string().contains("internal error"), "{err}");
+        insert_row(&h, 2, "ready", "[]");
+        let err = h
+            .store
+            .tx(|tx| versions::finish(tx, 2, Some(&e), now))
+            .unwrap_err();
+        assert!(err.to_string().contains("internal error"), "{err}");
+        assert_eq!(h.notices(), 0);
+        assert_eq!(h.event_row(), h.claimed());
+    }
+
+    #[test]
+    fn a_destination_write_error_is_store_io_and_rolls_back() {
+        let mut h = H::new();
+        let staged = h.staged(1);
+        fault::set(move |p| {
+            if p == Point::CopyBeforeOpen && !staged.join("guide.yaml").exists() {
+                fs::write(staged.join("guide.yaml"), "x").unwrap();
+            }
+            Action::Continue
+        });
+        let err = expect_err(h.commit(None));
+        fault::clear();
+        assert_eq!(err.code(), "store_io");
+        h.nothing_left(1);
+    }
+
+    #[test]
+    fn a_check_error_is_returned_and_rolled_back() {
+        let mut h = H::new();
+        set_provenance(&mut h, |v| {
+            v.as_object_mut().unwrap().remove("format");
+        });
+        let err = expect_err(h.commit(None));
+        assert_eq!(err.code(), "internal");
+        assert!(err.to_string().contains("does not parse"), "{err}");
+        h.nothing_left(1);
+
+        let mut h = H::new();
+        set_provenance(&mut h, |v| {
+            v.as_object_mut().unwrap().remove("format");
+        });
+        fs::write(h.draft.join("notes.txt"), "n").unwrap();
+        let err = expect_err(h.commit(None));
+        assert_eq!(err.code(), "internal");
+        assert!(err.to_string().contains("does not parse"), "{err}");
+        h.nothing_left(1);
+    }
+
+    #[test]
+    fn a_failed_rollback_keeps_the_original_error_and_the_row() {
+        let mut h = H::new();
+        fs::create_dir_all(h.store.dir().join("staging")).unwrap();
+        fs::write(h.staged(1), "in the way").unwrap();
+        let err = expect_err(h.commit(None));
+        assert_eq!(err.code(), "store_io");
+        assert_eq!(h.state_of(1).as_deref(), Some("staging"));
+        fs::remove_file(h.staged(1)).unwrap();
+        let v = h.commit(None).unwrap();
+        assert_eq!(v.version, 1);
+        assert_eq!(h.rows(), 1);
+        assert_eq!(h.state_of(1).as_deref(), Some("ready"));
+
+        let mut h = H::new();
+        fs::create_dir_all(h.store.dir().join("staging")).unwrap();
+        fs::write(h.staged(1), "in the way").unwrap();
+        expect_err(h.commit(None));
+        fs::remove_file(h.staged(1)).unwrap();
+        drop(h.reopen());
+        assert_eq!(h.state_of(1), None);
+    }
+
+    #[test]
+    fn a_non_notfound_lstat_error_fails_reconcile() {
+        let mut h = H::new();
+        insert_row(&h, 1, "staging", "[]");
+        fs::write(h.store.dir().join("guides"), "file").unwrap();
+        drop(h.reopen());
+        assert_eq!(h.state_of(1).as_deref(), Some("staging"));
+        let err = expect_err(h.commit(None));
+        assert_eq!(err.code(), "store_io");
+        assert_eq!(h.state_of(1).as_deref(), Some("staging"));
+    }
+
+    #[test]
+    fn an_unopenable_lock_file_does_not_fail_the_open() {
+        let h = H::new();
+        insert_row(&h, 1, "staging", "[]");
+        fs::create_dir(h.store.dir().join(COMMIT_LOCK)).unwrap();
+        drop(h.reopen());
+        assert_eq!(h.state_of(1).as_deref(), Some("staging"));
     }
 }
