@@ -2759,6 +2759,22 @@ fn measured_on_unicode() {
         }
     });
     assert_eq!(only(r, 2), vec![]);
+    // The flipped path is also measured on Unicode only.
+    let r = fake_src(|cs, d| match (cs, d) {
+        (U, Some(_)) => fd(80, 5, true),
+        (A, Some(_)) => fd(10, 5, true),
+        _ => fd(200, 1, false),
+    });
+    assert_eq!(
+        only(r, 4),
+        vec![wide_d(8, 80, " after LR→TD", fake_prev(80, 5, 40))]
+    );
+    let r = fake_src(|cs, d| match (cs, d) {
+        (U, Some(_)) => fd(10, 5, true),
+        (A, Some(_)) => fd(80, 5, true),
+        _ => fd(200, 1, false),
+    });
+    assert_eq!(only(r, 4), vec![]);
 }
 
 /// K7 preview_lines

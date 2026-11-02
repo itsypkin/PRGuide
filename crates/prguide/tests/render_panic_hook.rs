@@ -2,7 +2,7 @@
 
 use std::{panic::catch_unwind, sync::Mutex};
 
-use prguide::render::{Charset, MmdfluxRenderer, RenderError, RenderOpts, Renderer};
+use prguide::render::{Charset, Limit, MmdfluxRenderer, RenderError, RenderOpts, Renderer};
 
 static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
@@ -64,4 +64,25 @@ fn quiet_hook_silences_only_render_panics() {
     let _ = catch_unwind(|| panic!("after-unsupported"));
     assert_eq!(seen().len(), before + 2);
     assert_eq!(seen().last().map(String::as_str), Some("after-unsupported"));
+    // A pipeline-level TooLarge (the guard exists by then).
+    let long_title = format!("sequenceDiagram\n  title {}\n  A->>B: hi\n", "t".repeat(61));
+    assert!(matches!(
+        render(&long_title),
+        Err(RenderError::TooLarge {
+            limit: Limit::LabelChars,
+            actual: 61,
+            max: 60
+        })
+    ));
+    let _ = catch_unwind(|| panic!("after-too-large"));
+    assert_eq!(
+        seen(),
+        [
+            "outside-render",
+            "after-ok",
+            "after-invalid",
+            "after-unsupported",
+            "after-too-large"
+        ]
+    );
 }
