@@ -1806,20 +1806,49 @@ mod tests {
         assert_eq!(fs::read(outside.join("v1/keep.txt")).unwrap(), b"k");
     }
 
+    /// Wraps the fake clock; every read notes whether another connection can
+    /// take the write lock at that moment, then moves the time past the lease.
+    struct ProbeClock {
+        inner: Arc<FakeClock>,
+        db: PathBuf,
+        reads: std::sync::Mutex<Vec<bool>>,
+    }
+
+    impl crate::store::Clock for ProbeClock {
+        fn now(&self) -> Timestamp {
+            let conn = Connection::open(&self.db).unwrap();
+            conn.busy_timeout(Duration::ZERO).unwrap();
+            let locked = match conn.execute_batch("BEGIN IMMEDIATE") {
+                Ok(()) => {
+                    conn.execute_batch("ROLLBACK").unwrap();
+                    false
+                }
+                Err(_) => true,
+            };
+            self.reads.lock().unwrap().push(locked);
+            self.inner.advance(LEASE);
+            self.inner.now()
+        }
+    }
+
     #[test]
     fn the_reserve_gate_uses_the_time_after_the_write_lock_is_won() {
         let mut h = H::new();
-        let blocker = h.raw();
-        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let clock = Arc::clone(&h.clock);
-        let t = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(1000));
-            clock.advance(LEASE);
-            blocker.execute_batch("ROLLBACK").unwrap();
+        let probe = Arc::new(ProbeClock {
+            inner: Arc::clone(&h.clock),
+            db: h.store.dir().join("store.db"),
+            reads: std::sync::Mutex::new(Vec::new()),
         });
+        h.store = h
+            .reopen()
+            .with_clock(Arc::clone(&probe) as Arc<dyn crate::store::Clock>);
         let err = expect_err(h.commit(None));
-        t.join().unwrap();
         assert_eq!(err.code(), "run_stopped");
+        let reads = probe.reads.lock().unwrap().clone();
+        assert!(
+            !reads.is_empty() && reads.iter().all(|locked| *locked),
+            "every clock read happens while the write lock is held: {reads:?}"
+        );
         let state: String = h
             .raw()
             .query_row(
@@ -1832,20 +1861,33 @@ mod tests {
         no_trace(&h);
     }
 
+    /// Runs `f` on a thread and fails the test if it does not finish in time.
+    fn within_deadline<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(Duration::from_secs(20))
+            .expect("the commit did not finish in time")
+    }
+
     #[test]
     fn provenance_errors_come_before_the_lock() {
         let mut h = H::new();
         h.row.provenance_json = "garbage".into();
         let mut lock = versions::open_lock(h.store.dir()).unwrap();
         let _held = lock.write().unwrap();
-        let err = expect_err(h.commit(None));
-        assert_eq!(err.code(), "internal");
+        let (h, err) = within_deadline(move || {
+            let mut h = h;
+            let err = expect_err(h.commit(None)).to_string();
+            (h, err)
+        });
         assert!(
-            err.to_string()
-                .contains("the drafts row's provenance_json does not parse: "),
+            err.contains("the drafts row's provenance_json does not parse: "),
             "{err}"
         );
         no_trace(&h);
+        drop(_held);
 
         let mut h = H::new();
         set_provenance(&mut h, |v| {
@@ -1854,10 +1896,13 @@ mod tests {
         });
         let mut lock = versions::open_lock(h.store.dir()).unwrap();
         let _held = lock.write().unwrap();
-        let err = expect_err(h.commit(None));
-        assert_eq!(err.code(), "internal");
+        let (h, err) = within_deadline(move || {
+            let mut h = h;
+            let err = expect_err(h.commit(None)).to_string();
+            (h, err)
+        });
         assert!(
-            err.to_string().contains(
+            err.contains(
                 "the drafts row's provenance_json has selection kind commits but no commits"
             ),
             "{err}"
@@ -1878,8 +1923,10 @@ mod tests {
     #[test]
     fn odd_done_events_are_reported() {
         #[allow(clippy::type_complexity)]
-        let cases: [(Option<&str>, Option<&str>, &str, Option<&str>); 4] = [
+        let cases: [(Option<&str>, Option<&str>, &str, Option<&str>); 6] = [
             (None, None, "store_sqlite", None),
+            (None, Some("1"), "store_sqlite", None),
+            (Some("ack"), None, "store_sqlite", None),
             (Some("guide_version"), None, "store_sqlite", None),
             (Some("guide_version"), Some("x"), "store_sqlite", None),
             (
@@ -2018,5 +2065,245 @@ mod tests {
         fs::create_dir(h.store.dir().join(COMMIT_LOCK)).unwrap();
         drop(h.reopen());
         assert_eq!(h.state_of(1).as_deref(), Some("staging"));
+    }
+
+    /// R3: the commit's own error wins over a failing rollback.
+    #[test]
+    fn the_original_error_wins_over_a_failed_rollback() {
+        for reopen in [true, false] {
+            let mut h = H::new();
+            let target = h.staged(1).join("slides/step-one.md");
+            fault::set(move |p| {
+                if p == Point::AfterCopy {
+                    fs::write(&target, "garbage").unwrap();
+                }
+                Action::Continue
+            });
+            let refs_dir = h.root.join("repo/.git/refs/prguide/7/v1");
+            fs::create_dir_all(&refs_dir).unwrap();
+            let stale = refs_dir.join("snapshot-base.lock");
+            fs::write(&stale, "").unwrap();
+            let err = expect_err(h.commit(None));
+            fault::clear();
+            let Error::Guide(GuideError::CheckFailed {
+                message,
+                diagnostics,
+            }) = err
+            else {
+                panic!("not check_failed")
+            };
+            let n = diagnostics
+                .iter()
+                .filter(|d| d.severity == super::super::check::Severity::Error)
+                .count();
+            assert_eq!(
+                message,
+                format!("the draft has {n} error(s); fix them and run prguide guide commit again")
+            );
+            assert!(diagnostics.iter().any(|d| d.code == "front_matter_missing"));
+            assert_eq!(h.state_of(1).as_deref(), Some("staging"));
+            assert!(!exists(&h.staged(1)));
+            fs::remove_file(&stale).unwrap();
+            if reopen {
+                drop(h.reopen());
+                assert_eq!(h.state_of(1), None);
+            } else {
+                let v = h.commit(None).unwrap();
+                assert_eq!(v.version, 1);
+                assert_eq!(h.rows(), 1);
+            }
+        }
+    }
+
+    struct RestoreMode(PathBuf);
+
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// R4: a rollback that cannot lstat `staging/` stops before refs and row.
+    #[test]
+    fn a_rollback_that_cannot_inspect_staging_stops_early() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut h = H::new();
+        let dir = h.store.dir().to_path_buf();
+        let _restore = RestoreMode(dir.clone());
+        let d2 = dir.clone();
+        fault::set(move |p| {
+            if p == Point::AfterPin {
+                fs::set_permissions(&d2, fs::Permissions::from_mode(0o000)).unwrap();
+            }
+            Action::Continue
+        });
+        let err = expect_err(h.commit(None));
+        fault::clear();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        if err.code() != "store_io" {
+            // Permissions did not bite (running as root): nothing to test.
+            return;
+        }
+        assert_eq!(h.state_of(1).as_deref(), Some("staging"));
+        let mut want = h.pairs(1);
+        want.sort();
+        assert_eq!(h.refs(1), want);
+        assert!(exists(&h.staged(1)));
+        drop(h.reopen());
+        h.nothing_left(1);
+    }
+
+    /// R5: a symlinked `guides/` is not a real directory, so reconcile rolls back.
+    #[test]
+    fn reconcile_rolls_back_when_guides_dir_is_a_symlink() {
+        let mut h = H::new();
+        crash_at(Point::AfterPin);
+        expect_err(h.commit(None));
+        fault::clear();
+        let outside = h.root.join("outside");
+        fs::create_dir_all(outside.join("v1")).unwrap();
+        fs::write(outside.join("v1/planted.txt"), "p").unwrap();
+        let before = tree(&outside);
+        symlink(&outside, h.store.dir().join("guides")).unwrap();
+        drop(h.reopen());
+        assert_eq!(h.rows(), 0);
+        assert!(!exists(&h.staged(1)));
+        assert!(h.refs(1).is_empty());
+        assert_eq!(h.notices(), 0);
+        assert_eq!(
+            fs::read_link(h.store.dir().join("guides")).unwrap(),
+            outside
+        );
+        assert_eq!(tree(&outside), before);
+    }
+
+    fn mkfifo(path: &Path) {
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    /// R6: every copy-reject text of A10, FIFOs included.
+    #[test]
+    fn copy_reject_table() {
+        type Setup = fn(&Path, &Path);
+        let cases: Vec<(&str, Setup, &str, &str)> = vec![
+            (
+                "draft dir is a file",
+                |d, _| {
+                    fs::remove_dir_all(d).unwrap();
+                    fs::write(d, "x").unwrap();
+                },
+                ".",
+                "is not a directory",
+            ),
+            (
+                "guide.yaml symlink",
+                |d, root| {
+                    fs::write(root.join("g.yaml"), "x").unwrap();
+                    fs::remove_file(d.join("guide.yaml")).unwrap();
+                    symlink(root.join("g.yaml"), d.join("guide.yaml")).unwrap();
+                },
+                "guide.yaml",
+                "is a symlink",
+            ),
+            (
+                "guide.yaml fifo",
+                |d, _| {
+                    fs::remove_file(d.join("guide.yaml")).unwrap();
+                    mkfifo(&d.join("guide.yaml"));
+                },
+                "guide.yaml",
+                "is not a regular file",
+            ),
+            (
+                "slides symlink",
+                |d, root| {
+                    fs::create_dir(root.join("sl")).unwrap();
+                    fs::remove_dir_all(d.join("slides")).unwrap();
+                    symlink(root.join("sl"), d.join("slides")).unwrap();
+                },
+                "slides",
+                "is a symlink",
+            ),
+            (
+                "slides regular file",
+                |d, _| {
+                    fs::remove_dir_all(d.join("slides")).unwrap();
+                    fs::write(d.join("slides"), "x").unwrap();
+                },
+                "slides",
+                "is not a directory",
+            ),
+            (
+                "other top-level symlink",
+                |d, root| symlink(root, d.join("zlink")).unwrap(),
+                "zlink",
+                "is a symlink",
+            ),
+            (
+                "slide fifo",
+                |d, _| {
+                    fs::remove_file(d.join("slides/step-one.md")).unwrap();
+                    mkfifo(&d.join("slides/step-one.md"));
+                },
+                "slides/step-one.md",
+                "is not a regular file",
+            ),
+        ];
+        for (name, setup, entry, what) in cases {
+            let h = H::new();
+            setup(&h.draft, &h.root);
+            let want_message = format!(
+                "prguide guide commit copies only guide.yaml and slides/<id>.md, and \
+                 `{entry}` {what}; fix it and run prguide guide commit again"
+            );
+            let (h, outcome) = within_deadline(move || {
+                let mut h = h;
+                let want = check_draft(&h.git, &h.draft, &h.row.provenance_json);
+                let got = h.commit(None);
+                let out = match (got, want) {
+                    (
+                        Err(Error::Guide(GuideError::CheckFailed {
+                            message,
+                            diagnostics,
+                        })),
+                        Ok(w),
+                    ) => Ok((
+                        message,
+                        serde_json::to_value(&diagnostics).unwrap(),
+                        serde_json::to_value(&w.diagnostics).unwrap(),
+                    )),
+                    (Err(e), Err(w)) => Err((e.to_string(), w.to_string())),
+                    (Err(e), Ok(_)) => Err((e.to_string(), "check ok".into())),
+                    (Ok(_), _) => Err(("committed".into(), String::new())),
+                };
+                (h, out)
+            });
+            match outcome {
+                Ok((message, got, want)) => {
+                    assert_eq!(message, want_message, "{name}");
+                    assert_eq!(got, want, "{name}");
+                }
+                Err((got, want)) => assert_eq!(got, want, "{name}: errors must agree"),
+            }
+            h.nothing_left(1);
+        }
+    }
+
+    /// R6: an absent `slides/` copies fine; the check on the copy decides.
+    #[test]
+    fn absent_slides_dir_is_left_to_the_check() {
+        let mut h = H::new();
+        fs::remove_dir_all(h.draft.join("slides")).unwrap();
+        let err = expect_err(h.commit(None));
+        let Error::Guide(GuideError::CheckFailed { message, .. }) = err else {
+            panic!("not check_failed: {err}")
+        };
+        assert!(message.starts_with("the draft has "), "{message}");
+        h.nothing_left(1);
     }
 }

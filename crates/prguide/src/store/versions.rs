@@ -304,7 +304,15 @@ pub fn reconcile(store: &mut Store, git: &Git) -> Result<(), Error> {
             Err(e) if e.kind() == ErrorKind::NotFound => false,
             Err(e) => return Err(io(&published)(e).into()),
         };
-        if !is_dir {
+        // `guides/` itself must be a real directory, or `guides/v<k>` may
+        // live outside the store.
+        let guides_real = is_dir
+            && match fs::symlink_metadata(store_dir.join("guides")) {
+                Ok(meta) => meta.is_dir(),
+                Err(e) if e.kind() == ErrorKind::NotFound => false,
+                Err(e) => return Err(io(&store_dir.join("guides"))(e).into()),
+            };
+        if !guides_real {
             rollback(store, git, row.version, &row.refs)?;
             continue;
         }
