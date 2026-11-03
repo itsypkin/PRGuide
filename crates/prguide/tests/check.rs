@@ -2391,6 +2391,19 @@ fn failing_supported_type_with_text_still_fails() {
         false,
         invalid_both(8),
     );
+    // A text block does not excuse the size rules either.
+    let f3 = f3();
+    assert_report(
+        run_arch(Some(&f3), Some("[A]")),
+        true,
+        vec![wide_d(8, 77, "", prev(&f3, U, None))],
+    );
+    let f5 = f5();
+    assert_report(
+        run_arch(Some(&f5), Some("[A]")),
+        false,
+        vec![big_d(153, 9, "", prev(&f5, U, None))],
+    );
 }
 
 /// D14 panic_is_diagram_render
@@ -2522,6 +2535,39 @@ fn mermaid_line_is_the_fence_line() {
         &slide("arch", "architecture", "The shape", &[], &[], &body),
     );
     assert_report(ctx.chk(), false, invalid_both(12));
+    let body = format!("Shape.\n\nMore text.\n\n```mermaid\n{F16}```");
+    ctx.put(
+        "arch",
+        &slide("arch", "architecture", "The shape", &[], &[], &body),
+    );
+    assert_report(
+        ctx.chk(),
+        false,
+        vec![dd(
+            Severity::Error,
+            AF,
+            "unsupported_needs_text",
+            m_unsupported(10, "pie"),
+            Some("unsupported diagram type: pie".into()),
+        )],
+    );
+    let f5 = f5();
+    let body = format!("Shape.\n\nMore text.\n\n```mermaid\n{f5}```");
+    ctx.put(
+        "arch",
+        &slide("arch", "architecture", "The shape", &[], &[], &body),
+    );
+    assert_report(
+        ctx.chk(),
+        false,
+        vec![dd(
+            Severity::Error,
+            AF,
+            "diagram_too_large",
+            m_big(10, 153, 9, ""),
+            Some(prev(&f5, U, None)),
+        )],
+    );
 }
 
 fn same(a: &Result<TextDiagram, RenderError>, b: &Result<TextDiagram, RenderError>) -> bool {
@@ -2699,6 +2745,22 @@ fn ascii_only_failure() {
     }
 }
 
+/// K3 (cont.) the charsets fail with different errors
+#[test]
+fn ascii_only_failure_distinct_errors() {
+    let r = fake_src(|cs, _| match cs {
+        Charset::Unicode => Err(RenderError::Invalid("u".into())),
+        Charset::Ascii => Err(RenderError::Panic("a".into())),
+    });
+    assert_eq!(
+        only(r, 2),
+        vec![
+            render_d(8, "unicode", "render_invalid", "invalid diagram: u"),
+            render_d(8, "ascii", "render_panic", "renderer panicked: a"),
+        ]
+    );
+}
+
 /// K4 flipped_ascii_failure
 #[test]
 fn flipped_ascii_failure() {
@@ -2775,6 +2837,15 @@ fn measured_on_unicode() {
         _ => fd(200, 1, false),
     });
     assert_eq!(only(r, 4), vec![]);
+    // ASCII only has to render: an oversized flipped ASCII rendering passes.
+    for (w, h) in [(200, 200), (10, 109), (153, 5)] {
+        let r = fake_src(move |cs, d| match (cs, d) {
+            (U, Some(_)) => fd(50, 50, true),
+            (A, Some(_)) => fd(w, h, true),
+            _ => fd(200, 10, false),
+        });
+        assert_eq!(only(r, 4), vec![]);
+    }
 }
 
 /// K7 preview_lines

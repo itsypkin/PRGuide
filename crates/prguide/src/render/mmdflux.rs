@@ -395,6 +395,13 @@ mod tests {
             assert!(go(&src(&"b".repeat(60)), cs, false).is_ok());
             assert_label_limit(go(&src(&"b".repeat(61)), cs, false), 61);
         }
+        let two = format!(
+            "sequenceDiagram\n  box Aqua one\n  participant A\n  end\n  box Aqua {}\n  participant B\n  end\n  A->>B: hi\n",
+            "b".repeat(61)
+        );
+        for cs in CS {
+            assert_label_limit(go(&two, cs, false), 61);
+        }
     }
 
     /// R3 crlf_front_matter_matches_lf
