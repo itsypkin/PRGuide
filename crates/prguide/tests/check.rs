@@ -60,6 +60,20 @@ fn slide(id: &str, kind: &str, title: &str, code: &[&str], flags: &[&str], body:
     s
 }
 
+const F1: &str = "graph LR\n  A --> B\n";
+
+/// An architecture slide; with a mermaid block its fence is on line 8.
+fn arch(id: &str, mermaid: Option<&str>, text: Option<&str>) -> String {
+    let mut body = String::from("Shape.");
+    if let Some(m) = mermaid {
+        body.push_str(&format!("\n\n```mermaid\n{m}```"));
+    }
+    if let Some(t) = text {
+        body.push_str(&format!("\n\n```text\n{t}\n```"));
+    }
+    slide(id, "architecture", "The shape", &[], &[], &body)
+}
+
 fn step(id: &str, code: &[&str], flags: &[&str]) -> String {
     slide(id, "step", "Step one", code, flags, "Step body.")
 }
@@ -75,6 +89,7 @@ fn e(file: &str, field: &str, code: &'static str, message: &str) -> Diagnostic {
         field: field.into(),
         code,
         message: message.into(),
+        preview: None,
     }
 }
 
@@ -444,10 +459,7 @@ impl Ctx {
             "overview",
             &slide("overview", "overview", "Overview", &[], &[], "Overview."),
         );
-        self.put(
-            "arch",
-            &slide("arch", "architecture", "The shape", &[], &[], "Shape."),
-        );
+        self.put("arch", &arch("arch", Some(F1), None));
         self.put("step-one", &step("step-one", &[HANDLER, CTXB], &[FLAG5]));
     }
 
@@ -749,10 +761,7 @@ fn draft_of_other_run() {
         "overview",
         slide("overview", "overview", "Overview", &[], &[], "Overview."),
     );
-    put(
-        "arch",
-        slide("arch", "architecture", "The shape", &[], &[], "Shape."),
-    );
+    put("arch", arch("arch", Some(F1), None));
     put("step-one", step("step-one", &[HANDLER, CTXB], &[FLAG5]));
     let report = ctx.check_in(&run_b, &db.draft).unwrap();
     assert!(report.ok, "{:?}", report.diagnostics);
@@ -1734,30 +1743,6 @@ fn check_is_read_only() {
 
 // ---------------------------------------------------------------- seam, unit
 
-/// C44 architecture_without_diagram_passes
-#[test]
-fn architecture_without_diagram_passes() {
-    let ctx = Ctx::new();
-    ctx.valid();
-    let ok = CheckReport {
-        ok: true,
-        diagnostics: vec![],
-    };
-    assert_eq!(ctx.chk(), ok);
-    ctx.put(
-        "arch",
-        &slide(
-            "arch",
-            "architecture",
-            "The shape",
-            &[],
-            &[],
-            "Shape.\n\n```mermaid\nnot a diagram\n```",
-        ),
-    );
-    assert_eq!(ctx.chk(), ok);
-}
-
 /// X1 row_provenance_unparsable_is_internal
 #[test]
 fn row_provenance_unparsable_is_internal() {
@@ -2021,4 +2006,1258 @@ fn lossy_path_does_not_match() {
         .unwrap();
     let err = ctx.check_path(&raw).unwrap_err();
     assert_eq!(err.code(), "draft_unknown", "{err}");
+}
+
+// ---------------------------------------------------------------- diagrams (T5-2)
+
+use std::cell::RefCell;
+
+use prguide::{
+    guide::{
+        check::{PREVIEW_LINES, check_diagrams_with},
+        parse::parse_slide,
+    },
+    render::{
+        Charset, MmdfluxRenderer, RenderError, RenderOpts, Renderer, RootDirection, TextDiagram,
+        limits::Limit,
+    },
+};
+
+const U: Charset = Charset::Unicode;
+const A: Charset = Charset::Ascii;
+const FLIP: Option<RootDirection> = Some(RootDirection::TopDown);
+
+fn chain(dir: &str, labels: &[String], first_edge: Option<&str>) -> String {
+    let mut s = format!("graph {dir}\n");
+    for i in 0..labels.len() - 1 {
+        let edge = match (i, first_edge) {
+            (0, Some(l)) => format!("-->|{l}|"),
+            _ => "-->".to_owned(),
+        };
+        s.push_str(&format!(
+            "  N{}[{}] {edge} N{}[{}]\n",
+            i + 1,
+            labels[i],
+            i + 2,
+            labels[i + 1]
+        ));
+    }
+    s
+}
+
+fn fan(dir: &str, labels: &[String]) -> String {
+    let mut s = format!("graph {dir}\n");
+    for (i, l) in labels.iter().enumerate() {
+        s.push_str(&format!("  R[root] --> C{i}[{l}]\n"));
+    }
+    s
+}
+
+fn reps(c: &str, n: usize, count: usize) -> Vec<String> {
+    vec![c.repeat(n); count]
+}
+
+fn big() -> Vec<String> {
+    (0..27)
+        .map(|i| format!("{}{i:02}", "y".repeat(58)))
+        .collect()
+}
+
+fn numbered(n: usize) -> Vec<String> {
+    (1..=n).map(|i| format!("a{i}")).collect()
+}
+
+fn f2() -> String {
+    chain("LR", &reps("x", 12, 4), None)
+}
+fn f3() -> String {
+    chain("LR", &reps("x", 19, 3), None)
+}
+fn f4() -> String {
+    fan("TD", &reps("y", 31, 4))
+}
+fn f5() -> String {
+    let mut l = reps("y", 31, 3);
+    l.push("y".repeat(32));
+    fan("TD", &l)
+}
+fn f6() -> String {
+    chain("TD", &numbered(18), Some("e"))
+}
+fn f7() -> String {
+    let mut s = String::from("graph TD\n  subgraph S0\n    subgraph S1\n");
+    for i in 1..18 {
+        s.push_str(&format!("      N{i}[a{i}] --> N{}[a{}]\n", i + 1, i + 1));
+    }
+    s.push_str("    end\n  end\n");
+    s
+}
+fn f8() -> String {
+    chain("LR", &reps("x", 18, 6), None)
+}
+fn f9() -> String {
+    let mut l = reps("x", 17, 4);
+    l.push("x".repeat(28));
+    chain("LR", &l, None)
+}
+fn f10() -> String {
+    chain("LR", &numbered(20), None)
+}
+fn f11() -> String {
+    let mut s = String::from("graph LR\n");
+    for i in 1..10 {
+        s.push_str(&format!("  N{i}[a{i}] --> N{}[a{}]\n", i + 1, i + 1));
+    }
+    for j in 0..3 {
+        s.push_str(&format!("  N10 --> F{j}[{}{j}]\n", "f".repeat(20)));
+    }
+    s
+}
+fn f12() -> String {
+    fan("LR", &big())
+}
+fn f13() -> String {
+    fan("TD", &big())
+}
+const F14: &str = "graph TD\n  A --> \n  ]]] [[\n";
+const F15: &str = "graph TD\n  subgraph A\n    x\n  end\n  subgraph B\n    x\n  end\n";
+const F16: &str = "pie title X\n  \"a\" : 1\n";
+const HOSTILE: &str = "\u{1b}[2J\u{85}\u{202e}\u{7f}\u{9b}";
+fn f17() -> String {
+    format!(
+        "graph LR\n  A[\"{}{HOSTILE}\"] --> B[\"{}\"]\n",
+        "x".repeat(40),
+        "x".repeat(30)
+    )
+}
+fn f18() -> String {
+    let mut l = reps("x", 17, 4);
+    l.push("x".repeat(28));
+    chain("RL", &l, None)
+}
+
+fn opts(charset: Charset, root_direction: Option<RootDirection>) -> RenderOpts {
+    RenderOpts {
+        charset,
+        root_direction,
+    }
+}
+
+/// The first 40 lines of a real render, joined by "\n".
+fn prev(src: &str, cs: Charset, dir: Option<RootDirection>) -> String {
+    let d = MmdfluxRenderer.render(src, &opts(cs, dir)).unwrap();
+    d.lines[..d.lines.len().min(40)].join("\n")
+}
+
+fn dd(
+    severity: Severity,
+    file: &str,
+    code: &'static str,
+    message: String,
+    preview: Option<String>,
+) -> Diagnostic {
+    Diagnostic {
+        severity,
+        file: file.into(),
+        field: "body".into(),
+        code,
+        message,
+        preview,
+    }
+}
+
+const AF: &str = "slides/arch.md";
+
+fn m_no_diagram() -> String {
+    "an architecture slide needs a diagram: add a ```mermaid block (flowchart or sequenceDiagram), or a ```text block with text art".into()
+}
+fn m_unsupported(line: u32, kind: &str) -> String {
+    format!(
+        "the `mermaid` block (line {line}) is a `{kind}` diagram, which prg cannot draw; add a ```text block with the same diagram as text art, or use flowchart or sequenceDiagram"
+    )
+}
+fn m_render(line: u32, cs: &str, code: &str, e: &str) -> String {
+    format!("the `mermaid` block (line {line}) does not render in {cs} ({code}): {e}")
+}
+fn m_wide(line: u32, w: usize, after: &str) -> String {
+    format!(
+        "the `mermaid` block (line {line}) is {w} columns wide{after}, wider than the 76-column reference viewport; the reviewer has to pan to see all of it"
+    )
+}
+fn m_big(line: u32, w: usize, h: usize, clause: &str) -> String {
+    format!(
+        "the `mermaid` block (line {line}) is {w} columns by {h} rows, over the 152 by 108 cap{clause}; split it into smaller diagrams or simplify it"
+    )
+}
+
+fn no_diagram_d() -> Diagnostic {
+    dd(Severity::Error, AF, "no_diagram", m_no_diagram(), None)
+}
+fn wide_d(line: u32, w: usize, after: &str, preview: String) -> Diagnostic {
+    dd(
+        Severity::Warning,
+        AF,
+        "diagram_wide",
+        m_wide(line, w, after),
+        Some(preview),
+    )
+}
+fn big_d(w: usize, h: usize, clause: &str, preview: String) -> Diagnostic {
+    dd(
+        Severity::Error,
+        AF,
+        "diagram_too_large",
+        m_big(8, w, h, clause),
+        Some(preview),
+    )
+}
+fn render_d(line: u32, cs: &str, code: &str, e: &str) -> Diagnostic {
+    dd(
+        Severity::Error,
+        AF,
+        "diagram_render",
+        m_render(line, cs, code, e),
+        Some(e.into()),
+    )
+}
+
+impl Ctx {
+    /// Runs check on V with the arch slide replaced.
+    fn with_arch(&self, text: &str) -> CheckReport {
+        self.valid();
+        self.put("arch", text);
+        self.chk()
+    }
+}
+
+fn run_arch(mermaid: Option<&str>, text: Option<&str>) -> CheckReport {
+    Ctx::new().with_arch(&arch("arch", mermaid, text))
+}
+
+fn assert_report(r: CheckReport, ok: bool, diagnostics: Vec<Diagnostic>) {
+    assert_eq!(r.diagnostics, diagnostics);
+    assert_eq!(r.ok, ok);
+}
+
+/// D1 no_diagram
+#[test]
+fn no_diagram() {
+    assert_report(run_arch(None, None), false, vec![no_diagram_d()]);
+}
+
+/// D2 text_only_passes
+#[test]
+fn text_only_passes() {
+    assert_report(run_arch(None, Some("[A] -> [B]")), true, vec![]);
+}
+
+/// D3 fitting_diagram_passes
+#[test]
+fn fitting_diagram_passes() {
+    let ctx = Ctx::new();
+    ctx.valid();
+    assert_report(ctx.chk(), true, vec![]);
+}
+
+/// D4 wide_boundary_76_77
+#[test]
+fn wide_boundary_76_77() {
+    assert_report(run_arch(Some(&f2()), None), true, vec![]);
+    let f3 = f3();
+    assert_report(
+        run_arch(Some(&f3), None),
+        true,
+        vec![wide_d(8, 77, "", prev(&f3, U, None))],
+    );
+}
+
+/// D5 td_cap_width_152_153
+#[test]
+fn td_cap_width_152_153() {
+    let f4 = f4();
+    assert_report(
+        run_arch(Some(&f4), None),
+        true,
+        vec![wide_d(8, 152, "", prev(&f4, U, None))],
+    );
+    let f5 = f5();
+    assert_report(
+        run_arch(Some(&f5), None),
+        false,
+        vec![big_d(153, 9, "", prev(&f5, U, None))],
+    );
+}
+
+/// D6 cap_height_108_109
+#[test]
+fn cap_height_108_109() {
+    assert_report(run_arch(Some(&f6()), None), true, vec![]);
+    let f7 = f7();
+    let p = prev(&f7, U, None);
+    assert_eq!(p.lines().count(), 40);
+    assert_report(
+        run_arch(Some(&f7), None),
+        false,
+        vec![big_d(21, 109, "", p)],
+    );
+}
+
+/// D7 lr_flips_only_above_cap
+#[test]
+fn lr_flips_only_above_cap() {
+    let f8 = f8();
+    assert_report(
+        run_arch(Some(&f8), None),
+        true,
+        vec![wide_d(8, 152, "", prev(&f8, U, None))],
+    );
+    assert_report(run_arch(Some(&f9()), None), true, vec![]);
+    assert_report(run_arch(Some(&f18()), None), true, vec![]);
+}
+
+/// D8 lr_still_too_large_after_flip
+#[test]
+fn lr_still_too_large_after_flip() {
+    let f10 = f10();
+    assert_report(
+        run_arch(Some(&f10), None),
+        false,
+        vec![big_d(
+            214,
+            3,
+            ", and 7 columns by 117 rows after LR→TD",
+            prev(&f10, U, None),
+        )],
+    );
+}
+
+/// D9 lr_flip_wide
+#[test]
+fn lr_flip_wide() {
+    let f11 = f11();
+    assert_report(
+        run_arch(Some(&f11), None),
+        true,
+        vec![wide_d(8, 83, " after LR→TD", prev(&f11, U, FLIP))],
+    );
+}
+
+/// D10 lr_flip_fails_unicode
+#[test]
+fn lr_flip_fails_unicode() {
+    let f12 = f12();
+    assert_report(
+        run_arch(Some(&f12), None),
+        false,
+        vec![big_d(
+            216,
+            159,
+            ", and after LR→TD it does not render in unicode (render_too_large)",
+            prev(&f12, U, None),
+        )],
+    );
+}
+
+/// D11 unicode_only_render_failure
+#[test]
+fn unicode_only_render_failure() {
+    let e = "diagram too large: 68808 output_bytes (max 65536)";
+    assert_report(
+        run_arch(Some(&f13()), None),
+        false,
+        vec![render_d(8, "unicode", "render_too_large", e)],
+    );
+}
+
+fn invalid_both(line: u32) -> Vec<Diagnostic> {
+    let e = "invalid diagram: Parse error at line 2, column 9: expected identifier or edge_label";
+    vec![
+        render_d(line, "ascii", "render_invalid", e),
+        render_d(line, "unicode", "render_invalid", e),
+    ]
+}
+
+/// D12 invalid_both_charsets
+#[test]
+fn invalid_both_charsets() {
+    assert_report(run_arch(Some(F14), None), false, invalid_both(8));
+}
+
+/// D13 failing_supported_type_with_text_still_fails
+#[test]
+fn failing_supported_type_with_text_still_fails() {
+    assert_report(
+        run_arch(Some(F14), Some("[A] -> [B]")),
+        false,
+        invalid_both(8),
+    );
+    // A text block does not excuse the size rules either.
+    let f3 = f3();
+    assert_report(
+        run_arch(Some(&f3), Some("[A]")),
+        true,
+        vec![wide_d(8, 77, "", prev(&f3, U, None))],
+    );
+    let f5 = f5();
+    assert_report(
+        run_arch(Some(&f5), Some("[A]")),
+        false,
+        vec![big_d(153, 9, "", prev(&f5, U, None))],
+    );
+    // ... nor the flipped path's rules.
+    let f10 = f10();
+    assert_report(
+        run_arch(Some(&f10), Some("[A]")),
+        false,
+        vec![big_d(
+            214,
+            3,
+            ", and 7 columns by 117 rows after LR→TD",
+            prev(&f10, U, None),
+        )],
+    );
+    let f11 = f11();
+    assert_report(
+        run_arch(Some(&f11), Some("[A]")),
+        true,
+        vec![wide_d(8, 83, " after LR→TD", prev(&f11, U, FLIP))],
+    );
+    let f12 = f12();
+    assert_report(
+        run_arch(Some(&f12), Some("[A]")),
+        false,
+        vec![big_d(
+            216,
+            159,
+            ", and after LR→TD it does not render in unicode (render_too_large)",
+            prev(&f12, U, None),
+        )],
+    );
+}
+
+/// D14 panic_is_diagram_render
+#[test]
+fn panic_is_diagram_render() {
+    let e = "renderer panicked: no entry found for key";
+    assert_report(
+        run_arch(Some(F15), None),
+        false,
+        vec![
+            render_d(8, "ascii", "render_panic", e),
+            render_d(8, "unicode", "render_panic", e),
+        ],
+    );
+}
+
+/// D15 empty_mermaid_block
+#[test]
+fn empty_mermaid_block() {
+    let e = "invalid diagram: empty diagram: no diagram type line";
+    assert_report(
+        run_arch(Some(""), None),
+        false,
+        vec![
+            render_d(8, "ascii", "render_invalid", e),
+            render_d(8, "unicode", "render_invalid", e),
+        ],
+    );
+}
+
+/// D16 unsupported_needs_text
+#[test]
+fn unsupported_needs_text() {
+    assert_report(
+        run_arch(Some(F16), None),
+        false,
+        vec![dd(
+            Severity::Error,
+            AF,
+            "unsupported_needs_text",
+            m_unsupported(8, "pie"),
+            Some("unsupported diagram type: pie".into()),
+        )],
+    );
+}
+
+/// D17 unsupported_with_text_passes
+#[test]
+fn unsupported_with_text_passes() {
+    assert_report(run_arch(Some(F16), Some("[pie]")), true, vec![]);
+}
+
+/// D18 unlisted_arch_slide_is_checked
+#[test]
+fn unlisted_arch_slide_is_checked() {
+    let ctx = Ctx::new();
+    ctx.valid();
+    ctx.put("arch2", &arch("arch2", None, None));
+    let mut nd = no_diagram_d();
+    nd.file = "slides/arch2.md".into();
+    let unlisted = w(
+        "slides/arch2.md",
+        "",
+        "unlisted_slide",
+        "slides/arch2.md is not listed in guide.yaml's `slides`; list it or delete it",
+    );
+    assert_report(ctx.chk(), false, vec![unlisted, nd]);
+}
+
+/// D19 step_slide_mermaid_ignored
+#[test]
+fn step_slide_mermaid_ignored() {
+    let ctx = Ctx::new();
+    ctx.valid();
+    ctx.put(
+        "step-one",
+        &slide(
+            "step-one",
+            "step",
+            "Step one",
+            &[HANDLER, CTXB],
+            &[FLAG5],
+            "Step body.\n\n```mermaid\npie\n```",
+        ),
+    );
+    assert_report(ctx.chk(), true, vec![]);
+}
+
+/// D20 empty_slides_still_checks_diagrams
+#[test]
+fn empty_slides_still_checks_diagrams() {
+    let ctx = Ctx::new();
+    ctx.valid();
+    ctx.put("arch", &arch("arch", None, None));
+    ctx.set_slides(&[]);
+    let diags = ctx.diags();
+    assert_eq!(diags.len(), 2, "{diags:?}");
+    assert_eq!(
+        diags[0],
+        e(
+            "guide.yaml",
+            "slides",
+            "slide_file_missing",
+            "`slides` is empty: list the deck's slide ids in order, the overview first"
+        )
+    );
+    assert_eq!(diags[1], no_diagram_d());
+}
+
+/// D21 mermaid_line_is_the_fence_line
+#[test]
+fn mermaid_line_is_the_fence_line() {
+    let ctx = Ctx::new();
+    ctx.valid();
+    let f3 = f3();
+    let body = format!("Shape.\n\nMore text.\n\n```mermaid\n{f3}```");
+    ctx.put(
+        "arch",
+        &slide("arch", "architecture", "The shape", &[], &[], &body),
+    );
+    assert_report(
+        ctx.chk(),
+        true,
+        vec![wide_d(10, 77, "", prev(&f3, U, None))],
+    );
+    let body = format!("Shape.\n\n```text\n[A]\n```\n\n```mermaid\n{F14}```");
+    ctx.put(
+        "arch",
+        &slide("arch", "architecture", "The shape", &[], &[], &body),
+    );
+    assert_report(ctx.chk(), false, invalid_both(12));
+    let body = format!("Shape.\n\nMore text.\n\n```mermaid\n{F16}```");
+    ctx.put(
+        "arch",
+        &slide("arch", "architecture", "The shape", &[], &[], &body),
+    );
+    assert_report(
+        ctx.chk(),
+        false,
+        vec![dd(
+            Severity::Error,
+            AF,
+            "unsupported_needs_text",
+            m_unsupported(10, "pie"),
+            Some("unsupported diagram type: pie".into()),
+        )],
+    );
+    let f5 = f5();
+    let body = format!("Shape.\n\nMore text.\n\n```mermaid\n{f5}```");
+    ctx.put(
+        "arch",
+        &slide("arch", "architecture", "The shape", &[], &[], &body),
+    );
+    assert_report(
+        ctx.chk(),
+        false,
+        vec![dd(
+            Severity::Error,
+            AF,
+            "diagram_too_large",
+            m_big(10, 153, 9, ""),
+            Some(prev(&f5, U, None)),
+        )],
+    );
+}
+
+fn same(a: &Result<TextDiagram, RenderError>, b: &Result<TextDiagram, RenderError>) -> bool {
+    match (a, b) {
+        (Ok(x), Ok(y)) => x == y,
+        (Err(x), Err(y)) => x.to_string() == y.to_string(),
+        _ => false,
+    }
+}
+
+/// D22 render_is_deterministic
+#[test]
+fn render_is_deterministic() {
+    let cases = [
+        (f11(), U, FLIP),
+        (f12(), U, None),
+        (f13(), A, None),
+        (f8(), U, None),
+        (F15.to_owned(), U, None),
+    ];
+    for (src, cs, dir) in &cases {
+        let first = MmdfluxRenderer.render(src, &opts(*cs, *dir));
+        for _ in 0..3 {
+            assert!(same(&first, &MmdfluxRenderer.render(src, &opts(*cs, *dir))));
+        }
+    }
+}
+
+// ---- fake renderer
+
+type Call = (Charset, Option<RootDirection>);
+type Answer = Result<TextDiagram, RenderError>;
+
+struct Fake<F: Fn(Charset, Option<RootDirection>) -> Answer> {
+    calls: RefCell<Vec<Call>>,
+    f: F,
+}
+
+impl<F: Fn(Charset, Option<RootDirection>) -> Answer> Renderer for Fake<F> {
+    fn render(&self, _src: &str, o: &RenderOpts) -> Answer {
+        self.calls.borrow_mut().push((o.charset, o.root_direction));
+        (self.f)(o.charset, o.root_direction)
+    }
+}
+
+fn fd(width: usize, height: usize, over: bool) -> Answer {
+    let lines = (0..height)
+        .map(|i| format!("{:.<width$}", format!("r{i}")))
+        .collect();
+    Ok(TextDiagram {
+        lines,
+        width,
+        height,
+        direction_overridden: over,
+    })
+}
+
+fn fake_run<F: Fn(Charset, Option<RootDirection>) -> Answer>(
+    f: F,
+    mermaid: Option<&str>,
+    text: Option<&str>,
+) -> (Vec<Diagnostic>, Vec<Call>) {
+    let fake = Fake {
+        calls: RefCell::new(vec![]),
+        f,
+    };
+    let slide = parse_slide(AF, &arch("arch", mermaid, text)).unwrap();
+    let mut out = vec![];
+    check_diagrams_with(&fake, &slide, &mut out);
+    let calls = fake.calls.into_inner();
+    (out, calls)
+}
+
+fn fake_src<F: Fn(Charset, Option<RootDirection>) -> Answer>(f: F) -> (Vec<Diagnostic>, Vec<Call>) {
+    fake_run(f, Some(F1), None)
+}
+
+/// K1 call_counts
+#[test]
+fn call_counts() {
+    let (_, c) = fake_run(|_, _| fd(1, 1, false), None, None);
+    assert_eq!(c, vec![]);
+    let un = |_, _| Err(RenderError::Unsupported("pie".into()));
+    assert_eq!(fake_run(un, Some(F1), None).1, vec![(U, None)]);
+    assert_eq!(fake_run(un, Some(F1), Some("t")).1, vec![(U, None)]);
+    let (_, c) = fake_src(|_, _| fd(76, 36, false));
+    assert_eq!(c, vec![(U, None), (A, None)]);
+    let (_, c) = fake_src(|_, _| fd(153, 1, false));
+    assert_eq!(c, vec![(U, None), (A, None), (U, FLIP)]);
+    let (_, c) = fake_src(|_, d| {
+        if d.is_some() {
+            fd(160, 1, true)
+        } else {
+            fd(200, 1, false)
+        }
+    });
+    assert_eq!(c, vec![(U, None), (A, None), (U, FLIP)]);
+    let (_, c) = fake_src(|_, d| {
+        if d.is_some() {
+            fd(76, 108, true)
+        } else {
+            fd(200, 1, false)
+        }
+    });
+    assert_eq!(c, vec![(U, None), (A, None), (U, FLIP), (A, FLIP)]);
+}
+
+fn only(r: (Vec<Diagnostic>, Vec<Call>), n: usize) -> Vec<Diagnostic> {
+    assert_eq!(r.1.len(), n, "{:?}", r.1);
+    r.0
+}
+
+fn sized(w: usize, h: usize) -> impl Fn(Charset, Option<RootDirection>) -> Answer {
+    move |_, _| fd(w, h, false)
+}
+
+fn fake_prev(w: usize, h: usize, n: usize) -> String {
+    let d = fd(w, h, false).unwrap();
+    d.lines[..n.min(h)].join("\n")
+}
+
+/// K2 size_boundaries_exact
+#[test]
+fn size_boundaries_exact() {
+    assert_eq!(only(fake_src(sized(76, 108)), 2), vec![]);
+    assert_eq!(
+        only(fake_src(sized(77, 1)), 2),
+        vec![wide_d(8, 77, "", fake_prev(77, 1, 40))]
+    );
+    assert_eq!(
+        only(fake_src(sized(152, 108)), 2),
+        vec![wide_d(8, 152, "", fake_prev(152, 108, 40))]
+    );
+    assert_eq!(
+        only(fake_src(sized(153, 1)), 3),
+        vec![big_d(153, 1, "", fake_prev(153, 1, 40))]
+    );
+    assert_eq!(
+        only(fake_src(sized(1, 109)), 3),
+        vec![big_d(1, 109, "", fake_prev(1, 109, 40))]
+    );
+    let r = fake_src(|_, d| {
+        if d.is_some() {
+            fd(50, 50, false)
+        } else {
+            fd(200, 10, false)
+        }
+    });
+    assert_eq!(only(r, 3), vec![big_d(200, 10, "", fake_prev(200, 10, 40))]);
+}
+
+/// K3 ascii_only_failure
+#[test]
+fn ascii_only_failure() {
+    let expect = vec![render_d(8, "ascii", "render_invalid", "invalid diagram: x")];
+    for (w, h) in [(10, 10), (77, 1), (200, 10)] {
+        let r = fake_src(move |cs, _| match cs {
+            Charset::Ascii => Err(RenderError::Invalid("x".into())),
+            Charset::Unicode => fd(w, h, false),
+        });
+        assert_eq!(only(r, 2), expect);
+    }
+    let expect = vec![render_d(
+        8,
+        "ascii",
+        "render_unsupported",
+        "unsupported diagram type: x",
+    )];
+    for (w, h) in [(10, 10), (77, 1), (200, 10)] {
+        let r = fake_src(move |cs, _| match cs {
+            Charset::Ascii => Err(RenderError::Unsupported("x".into())),
+            Charset::Unicode => fd(w, h, false),
+        });
+        assert_eq!(only(r, 2), expect);
+    }
+}
+
+/// K3 (cont.) the charsets fail with different errors
+#[test]
+fn both_charsets_fail_with_their_own_errors() {
+    let r = fake_src(|cs, _| match cs {
+        Charset::Unicode => Err(RenderError::Invalid("u".into())),
+        Charset::Ascii => Err(RenderError::Panic("a".into())),
+    });
+    assert_eq!(
+        only(r, 2),
+        vec![
+            render_d(8, "unicode", "render_invalid", "invalid diagram: u"),
+            render_d(8, "ascii", "render_panic", "renderer panicked: a"),
+        ]
+    );
+}
+
+/// K4 flipped_ascii_failure
+#[test]
+fn flipped_ascii_failure() {
+    let r = fake_src(|cs, d| match (cs, d) {
+        (A, Some(_)) => Err(RenderError::Panic("p".into())),
+        (_, Some(_)) => fd(50, 50, true),
+        _ => fd(200, 10, false),
+    });
+    assert_eq!(
+        only(r, 4),
+        vec![big_d(
+            200,
+            10,
+            ", and after LR→TD it does not render in ascii (render_panic)",
+            fake_prev(200, 10, 40)
+        )]
+    );
+}
+
+/// K4 (cont.) the flipped ASCII error code is the error's own
+#[test]
+fn flipped_ascii_failure_code() {
+    let r = fake_src(|cs, d| match (cs, d) {
+        (A, Some(_)) => Err(RenderError::Invalid("x".into())),
+        (_, Some(_)) => fd(50, 50, true),
+        _ => fd(200, 10, false),
+    });
+    assert_eq!(
+        only(r, 4),
+        vec![big_d(
+            200,
+            10,
+            ", and after LR→TD it does not render in ascii (render_invalid)",
+            fake_prev(200, 10, 40)
+        )]
+    );
+}
+
+/// K5 flipped_unicode_error
+#[test]
+fn flipped_unicode_error() {
+    let r = fake_src(|_, d| match d {
+        Some(_) => Err(RenderError::TooLarge {
+            limit: Limit::OutputBytes,
+            actual: 70000,
+            max: 65536,
+        }),
+        None => fd(200, 10, false),
+    });
+    assert_eq!(
+        only(r, 3),
+        vec![big_d(
+            200,
+            10,
+            ", and after LR→TD it does not render in unicode (render_too_large)",
+            fake_prev(200, 10, 40)
+        )]
+    );
+}
+
+/// K5 (cont.) the flipped Unicode error code is the error's own
+#[test]
+fn flipped_unicode_error_code() {
+    let r = fake_src(|_, d| match d {
+        Some(_) => Err(RenderError::Panic("p".into())),
+        None => fd(200, 10, false),
+    });
+    assert_eq!(
+        only(r, 3),
+        vec![big_d(
+            200,
+            10,
+            ", and after LR→TD it does not render in unicode (render_panic)",
+            fake_prev(200, 10, 40)
+        )]
+    );
+}
+
+/// K6 measured_on_unicode
+#[test]
+fn measured_on_unicode() {
+    let r = fake_src(|cs, _| {
+        if cs == U {
+            fd(77, 1, false)
+        } else {
+            fd(10, 1, false)
+        }
+    });
+    assert_eq!(only(r, 2), vec![wide_d(8, 77, "", fake_prev(77, 1, 40))]);
+    let r = fake_src(|cs, _| {
+        if cs == U {
+            fd(10, 1, false)
+        } else {
+            fd(200, 200, false)
+        }
+    });
+    assert_eq!(only(r, 2), vec![]);
+    // The flipped path is also measured on Unicode only.
+    let r = fake_src(|cs, d| match (cs, d) {
+        (U, Some(_)) => fd(80, 5, true),
+        (A, Some(_)) => fd(10, 5, true),
+        _ => fd(200, 1, false),
+    });
+    assert_eq!(
+        only(r, 4),
+        vec![wide_d(8, 80, " after LR→TD", fake_prev(80, 5, 40))]
+    );
+    let r = fake_src(|cs, d| match (cs, d) {
+        (U, Some(_)) => fd(10, 5, true),
+        (A, Some(_)) => fd(80, 5, true),
+        _ => fd(200, 1, false),
+    });
+    assert_eq!(only(r, 4), vec![]);
+    // ASCII only has to render: an oversized flipped ASCII rendering passes.
+    for (w, h) in [(200, 200), (10, 109), (153, 5)] {
+        let r = fake_src(move |cs, d| match (cs, d) {
+            (U, Some(_)) => fd(50, 50, true),
+            (A, Some(_)) => fd(w, h, true),
+            _ => fd(200, 10, false),
+        });
+        assert_eq!(only(r, 4), vec![]);
+    }
+}
+
+/// K7 preview_lines
+#[test]
+fn preview_lines() {
+    let got = only(fake_src(sized(200, 50)), 3);
+    assert_eq!(got.len(), 1);
+    let p = got[0].preview.clone().unwrap();
+    assert_eq!(p, fake_prev(200, 50, 40));
+    assert_eq!(p.lines().count(), PREVIEW_LINES);
+    assert!(!p.ends_with('\n'));
+    assert!(p.starts_with("r0...") && p.contains("\nr39..."));
+    let got = only(fake_src(sized(77, 40)), 2);
+    assert_eq!(got[0].preview.as_ref().unwrap().lines().count(), 40);
+    let r = fake_src(|_, d| {
+        if d.is_some() {
+            fd(80, 5, true)
+        } else {
+            fd(200, 1, false)
+        }
+    });
+    assert_eq!(
+        only(r, 4),
+        vec![wide_d(8, 80, " after LR→TD", fake_prev(80, 5, 40))]
+    );
+}
+
+/// K8 flip_fits_narrow
+#[test]
+fn flip_fits_narrow() {
+    let r = fake_src(|_, d| {
+        if d.is_some() {
+            fd(76, 108, true)
+        } else {
+            fd(200, 10, false)
+        }
+    });
+    assert_eq!(only(r, 4), vec![]);
+}
+
+/// K2 (cont.) the flipped rendering on the cap's edges
+#[test]
+fn flipped_cap_edges() {
+    let flip = |w: usize, h: usize| {
+        fake_src(move |_, d| {
+            if d.is_some() {
+                fd(w, h, true)
+            } else {
+                fd(200, 10, false)
+            }
+        })
+    };
+    assert_eq!(
+        only(flip(152, 108), 4),
+        vec![wide_d(8, 152, " after LR→TD", fake_prev(152, 108, 40))]
+    );
+    assert_eq!(
+        only(flip(1, 109), 3),
+        vec![big_d(
+            200,
+            10,
+            ", and 1 columns by 109 rows after LR→TD",
+            fake_prev(200, 10, 40)
+        )]
+    );
+    assert_eq!(
+        only(flip(153, 1), 3),
+        vec![big_d(
+            200,
+            10,
+            ", and 153 columns by 1 rows after LR→TD",
+            fake_prev(200, 10, 40)
+        )]
+    );
+}
+
+/// K7 (cont.) the flipped wide boundary at 77
+#[test]
+fn flipped_wide_77() {
+    let r = fake_src(|_, d| {
+        if d.is_some() {
+            fd(77, 5, true)
+        } else {
+            fd(200, 10, false)
+        }
+    });
+    assert_eq!(
+        only(r, 4),
+        vec![wide_d(8, 77, " after LR→TD", fake_prev(77, 5, 40))]
+    );
+}
+
+/// K8 (cont.) over the cap by height alone, flippable
+#[test]
+fn flip_fits_when_tall() {
+    let r = fake_src(|_, d| {
+        if d.is_some() {
+            fd(50, 50, true)
+        } else {
+            fd(100, 150, false)
+        }
+    });
+    assert_eq!(only(r, 4), vec![]);
+}
+
+/// K1 (cont.) the unsupported kind is printed as given
+#[test]
+fn unsupported_kind_as_given() {
+    let r = fake_src(|_, _| Err(RenderError::Unsupported("gantt".into())));
+    assert_eq!(
+        only(r, 1),
+        vec![dd(
+            Severity::Error,
+            AF,
+            "unsupported_needs_text",
+            m_unsupported(8, "gantt"),
+            Some("unsupported diagram type: gantt".into()),
+        )]
+    );
+}
+
+// ---- binary tests
+
+/// B1 binary_panic_stderr_empty
+#[test]
+fn binary_panic_stderr_empty() {
+    let ctx = Ctx::live();
+    ctx.valid();
+    ctx.put("arch", &arch("arch", Some(F15), None));
+    let out = ctx.bin_ok();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(text.lines().count(), 1);
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let e = "renderer panicked: no entry found for key";
+    let want: Vec<_> = [
+        render_d(8, "ascii", "render_panic", e),
+        render_d(8, "unicode", "render_panic", e),
+    ]
+    .iter()
+    .map(|d| {
+        serde_json::json!({"severity": "error", "file": d.file, "field": d.field,
+            "code": d.code, "message": d.message, "preview": d.preview})
+    })
+    .collect();
+    assert_eq!(v["diagnostics"], serde_json::Value::Array(want));
+}
+
+/// B2 binary_hostile_preview_escaped
+#[test]
+fn binary_hostile_preview_escaped() {
+    let ctx = Ctx::live();
+    ctx.valid();
+    ctx.put("arch", &arch("arch", Some(&f17()), None));
+    let out = ctx.bin_ok();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stderr.is_empty());
+    no_hostile_bytes(&out.stdout);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let list = v["diagnostics"].as_array().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["code"], "diagram_wide");
+    assert_eq!(list[0]["severity"], "warning");
+    assert!(
+        list[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("is 92 columns wide")
+    );
+    assert!(list[0]["preview"].as_str().unwrap().contains(HOSTILE));
+}
+
+/// B3 binary_preview_key_presence
+#[test]
+fn binary_preview_key_presence() {
+    let ctx = Ctx::live();
+    ctx.valid();
+    let f3 = f3();
+    ctx.put("arch", &arch("arch", Some(&f3), None));
+    ctx.put("arch2", &arch("arch2", None, None));
+    let out = ctx.bin_ok();
+    let text = String::from_utf8(out.stdout).unwrap();
+    let j = |s: &str| serde_json::to_string(s).unwrap();
+    let wide = format!(
+        "{{\"severity\":\"warning\",\"file\":\"slides/arch.md\",\"field\":\"body\",\"code\":\"diagram_wide\",\"message\":{},\"preview\":{}}}",
+        j(&m_wide(8, 77, "")),
+        j(&prev(&f3, U, None))
+    );
+    assert!(text.contains(&wide), "{text}");
+    assert!(text.contains(&format!("\"message\":{}}}", j(&m_no_diagram()))));
+    assert!(text.contains(&format!(
+        "\"message\":{}}}",
+        j("slides/arch2.md is not listed in guide.yaml's `slides`; list it or delete it")
+    )));
+}
+
+/// X15 binary_drafts_dir_renamed_is_unknown (row 78)
+#[test]
+fn binary_drafts_dir_renamed_is_unknown() {
+    let ctx = Ctx::live();
+    ctx.valid();
+    let parent = ctx.draft.parent().unwrap().to_path_buf();
+    fs::rename(&parent, parent.with_file_name("drafts-away")).unwrap();
+    let out = ctx.bin(&ctx.clone, &ctx.draft, &ctx.run);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let text = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(text.lines().count(), 1);
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["code"], "draft_unknown");
+    assert_eq!(v["message"], draft_unknown_msg(&ctx.draft, &ctx.run));
+}
+
+/// Runs `prguide check` on the live binary with a kill deadline and returns
+/// the decoded diagnostics.
+fn bin_diagnostics(mermaid: &str) -> Vec<serde_json::Value> {
+    use std::process::{Command, Stdio};
+    let ctx = Ctx::live();
+    ctx.valid();
+    ctx.put("arch", &arch("arch", Some(mermaid), None));
+    let home = ctx.fx.path().join("home");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_prguide"))
+        .current_dir(&ctx.clone)
+        .arg("check")
+        .arg(&ctx.draft)
+        .args(["--run", &ctx.run])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
+        .env("PRGUIDE_HOME", &ctx.home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("prguide check did not return within 10 s");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let mut text = String::new();
+    std::io::Read::read_to_string(child.stdout.as_mut().unwrap(), &mut text).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    v["diagnostics"].as_array().unwrap().clone()
+}
+
+/// Asserts exactly an ascii and a unicode `diagram_render` error whose
+/// message ends with `(<code>): <err>`.
+fn assert_render_pair(src: &str, code: &str, err: &str) {
+    let d = bin_diagnostics(src);
+    assert_eq!(d.len(), 2, "{src:?}: {d:?}");
+    for (x, cs) in d.iter().zip(["ascii", "unicode"]) {
+        assert_eq!(x["code"], "diagram_render", "{src:?}");
+        assert_eq!(x["severity"], "error");
+        let want = format!("does not render in {cs} ({code}): {err}");
+        assert!(
+            x["message"].as_str().unwrap().ends_with(&want),
+            "{src:?}: {x}"
+        );
+        assert_eq!(x["preview"], err);
+    }
+}
+
+/// T1 deep_subgraph_nesting_returns
+#[test]
+fn deep_subgraph_nesting_returns() {
+    let src = format!("graph TD\n{}", "subgraph s\n".repeat(743));
+    assert_render_pair(
+        &src,
+        "render_too_large",
+        "diagram too large: 743 subgraphs (max 12)",
+    );
+}
+
+/// T2 subgraph_limit_boundary
+#[test]
+fn subgraph_limit_boundary() {
+    let shape = |n: usize| {
+        format!(
+            "graph TD\n{}A --> --> B\n{}",
+            "subgraph s\n".repeat(n),
+            "end\n".repeat(n)
+        )
+    };
+    let d = bin_diagnostics(&shape(12));
+    assert_eq!(d.len(), 2, "{d:?}");
+    for x in &d {
+        let m = x["message"].as_str().unwrap();
+        assert!(
+            m.contains("(render_invalid): invalid diagram: Parse error"),
+            "{m}"
+        );
+    }
+    assert_render_pair(
+        &shape(13),
+        "render_too_large",
+        "diagram too large: 13 subgraphs (max 12)",
+    );
+}
+
+/// T3 empty_diagrams_are_errors
+#[test]
+fn empty_diagrams_are_errors() {
+    let err = "invalid diagram: empty diagram: nothing to draw; add nodes or messages";
+    for src in [
+        "flowchart LR\n  %% TODO draw the store\n",
+        "sequenceDiagram\n  Agent calls prguide then waits\n",
+        "graph LR\n",
+        "sequenceDiagram\n  title Hello\n",
+        "graph LR\n  subgraph s[Empty]\n  end\n",
+    ] {
+        assert_render_pair(src, "render_invalid", err);
+    }
+    assert!(bin_diagnostics("graph LR\n  A\n").is_empty());
+    assert!(bin_diagnostics("sequenceDiagram\n  participant A\n").is_empty());
+}
+
+/// T4 unclosed_subgraph_is_error
+#[test]
+fn unclosed_subgraph_is_error() {
+    let msg = "invalid diagram: `subgraph` was read as a node id: write `subgraph id[Title]` and its closing `end` each on their own line, or rename the node";
+    for src in [
+        "graph TD\n  subgraph s[Agent]\n    A --> B\n",
+        "graph LR\n  Graph --> Subgraph --> Node\n",
+        "graph TD\n  subgraph s[Group]\n    A --> SubGraph[Worker]\n  end\n",
+        "graph TD\n  SUBGRAPH s[Agent]\n    A --> B\n",
+        "graph TD\n  subgraph Payment Service\n    P --> Q\n  end\n",
+        "graph TD\n  subgraph s[Agent]\n    A --> B\n  end %% done\n",
+    ] {
+        assert_render_pair(src, "render_invalid", msg);
+    }
+    assert!(bin_diagnostics("graph TD\n  subgraph s[Agent]\n    A --> B\n  end\n").is_empty());
+    assert!(
+        bin_diagnostics("graph TD\n  subgraph p[Payment Service]\n    P --> Q\n  end\n").is_empty()
+    );
 }

@@ -19,6 +19,9 @@ use crate::{
     Error,
     anchors::{BlockContext, CodeBlock, resolve},
     git::Git,
+    render::{
+        Charset, MmdfluxRenderer, RenderError, RenderOpts, Renderer, RootDirection, TextDiagram,
+    },
     store::{StoreError, runs::RunId},
 };
 
@@ -36,6 +39,8 @@ pub struct Diagnostic {
     pub field: String,
     pub code: &'static str,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -145,6 +150,7 @@ fn diag(severity: Severity, error: GuideError) -> Diagnostic {
         field: error.field().unwrap_or("").to_owned(),
         code: error.code(),
         message: error.to_string(),
+        preview: None,
     }
 }
 
@@ -378,8 +384,195 @@ fn flag_rules(slide: &Slide, out: &mut Vec<Diagnostic>) {
     }
 }
 
-/// T5-2 adds the diagram rules here.
-pub fn check_diagrams(_slide: &Slide, _out: &mut Vec<Diagnostic>) {}
+/// Reference viewport content width (an 80-column pane minus the frame).
+pub const REFERENCE_WIDTH: usize = 76;
+/// Reference viewport content height (a 40-row pane minus the frame).
+pub const REFERENCE_HEIGHT: usize = 36;
+/// Widest diagram the viewer pans before it tries LR→TD: min(2 × 76, 200).
+pub const CAP_WIDTH: usize = 152;
+/// Tallest diagram the viewer pans before it tries LR→TD: 3 × 36.
+pub const CAP_HEIGHT: usize = 108;
+/// The most rendering lines a preview carries.
+pub const PREVIEW_LINES: usize = 40;
+
+fn fits_cap(d: &TextDiagram) -> bool {
+    d.width <= CAP_WIDTH && d.height <= CAP_HEIGHT
+}
+
+fn is_wide(d: &TextDiagram) -> bool {
+    d.width > REFERENCE_WIDTH
+}
+
+fn preview_of(d: &TextDiagram) -> String {
+    d.lines
+        .iter()
+        .take(PREVIEW_LINES)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn charset_name(cs: Charset) -> &'static str {
+    match cs {
+        Charset::Unicode => "unicode",
+        Charset::Ascii => "ascii",
+    }
+}
+
+fn body_diag(
+    severity: Severity,
+    file: &str,
+    message: String,
+    preview: Option<String>,
+    build: fn(String, String, String) -> GuideError,
+) -> Diagnostic {
+    let mut d = diag(severity, build(file.to_owned(), "body".to_owned(), message));
+    d.preview = preview;
+    d
+}
+
+/// Runs the diagram rules on one architecture slide with the real renderer.
+pub fn check_diagrams(slide: &Slide, out: &mut Vec<Diagnostic>) {
+    check_diagrams_with(&MmdfluxRenderer, slide, out);
+}
+
+/// The diagram rules (design §2.8) with an injectable renderer.
+pub fn check_diagrams_with(renderer: &dyn Renderer, slide: &Slide, out: &mut Vec<Diagnostic>) {
+    let file = slide.file.as_str();
+    let Some(block) = &slide.mermaid else {
+        if slide.text_art.is_none() {
+            out.push(body_diag(
+                Severity::Error,
+                file,
+                "an architecture slide needs a diagram: add a ```mermaid block (flowchart or sequenceDiagram), or a ```text block with text art".to_owned(),
+                None,
+                |file, field, message| GuideError::NoDiagram { file, field, message },
+            ));
+        }
+        return;
+    };
+    let line = block.line;
+    let src = block.source.as_str();
+    let render = |charset, root_direction| {
+        renderer.render(
+            src,
+            &RenderOpts {
+                charset,
+                root_direction,
+            },
+        )
+    };
+    let flip = Some(RootDirection::TopDown);
+    let u = render(Charset::Unicode, None);
+    if let Err(RenderError::Unsupported(kind)) = &u {
+        if slide.text_art.is_none() {
+            out.push(body_diag(
+                Severity::Error,
+                file,
+                format!("the `mermaid` block (line {line}) is a `{kind}` diagram, which prg cannot draw; add a ```text block with the same diagram as text art, or use flowchart or sequenceDiagram"),
+                u.as_ref().err().map(ToString::to_string),
+                |file, field, message| GuideError::UnsupportedNeedsText { file, field, message },
+            ));
+        }
+        return;
+    }
+    let a = render(Charset::Ascii, None);
+    let mut failed = false;
+    for (cs, result) in [(Charset::Unicode, &u), (Charset::Ascii, &a)] {
+        if let Err(e) = result {
+            failed = true;
+            out.push(body_diag(
+                Severity::Error,
+                file,
+                format!(
+                    "the `mermaid` block (line {line}) does not render in {} ({}): {e}",
+                    charset_name(cs),
+                    e.code()
+                ),
+                Some(e.to_string()),
+                |file, field, message| GuideError::DiagramRender {
+                    file,
+                    field,
+                    message,
+                },
+            ));
+        }
+    }
+    let (Ok(u), false) = (u, failed) else {
+        return;
+    };
+    let wide = |d: &TextDiagram, after: &str, out: &mut Vec<Diagnostic>| {
+        out.push(body_diag(
+            Severity::Warning,
+            file,
+            format!(
+                "the `mermaid` block (line {line}) is {} columns wide{after}, wider than the {REFERENCE_WIDTH}-column reference viewport; the reviewer has to pan to see all of it",
+                d.width
+            ),
+            Some(preview_of(d)),
+            |file, field, message| GuideError::DiagramWide { file, field, message },
+        ));
+    };
+    if fits_cap(&u) {
+        if is_wide(&u) {
+            wide(&u, "", out);
+        }
+        return;
+    }
+    let too_large = |clause: String, out: &mut Vec<Diagnostic>| {
+        out.push(body_diag(
+            Severity::Error,
+            file,
+            format!(
+                "the `mermaid` block (line {line}) is {} columns by {} rows, over the {CAP_WIDTH} by {CAP_HEIGHT} cap{clause}; split it into smaller diagrams or simplify it",
+                u.width, u.height
+            ),
+            Some(preview_of(&u)),
+            |file, field, message| GuideError::DiagramTooLarge { file, field, message },
+        ));
+    };
+    let fu = match render(Charset::Unicode, flip) {
+        Err(e) => {
+            too_large(
+                format!(
+                    ", and after LR→TD it does not render in unicode ({})",
+                    e.code()
+                ),
+                out,
+            );
+            return;
+        }
+        Ok(fu) => fu,
+    };
+    if !fu.direction_overridden {
+        too_large(String::new(), out);
+        return;
+    }
+    if !fits_cap(&fu) {
+        too_large(
+            format!(
+                ", and {} columns by {} rows after LR→TD",
+                fu.width, fu.height
+            ),
+            out,
+        );
+        return;
+    }
+    match render(Charset::Ascii, flip) {
+        Err(e) => too_large(
+            format!(
+                ", and after LR→TD it does not render in ascii ({})",
+                e.code()
+            ),
+            out,
+        ),
+        Ok(_) => {
+            if is_wide(&fu) {
+                wide(&fu, " after LR→TD", out);
+            }
+        }
+    }
+}
 
 /// Everything after the drafts row, on any directory.
 pub fn check_draft(git: &Git, dir: &Path, provenance_json: &str) -> Result<CheckReport, Error> {
@@ -414,6 +607,7 @@ pub fn check_draft(git: &Git, dir: &Path, provenance_json: &str) -> Result<Check
             field: e.field().unwrap_or("").to_owned(),
             code: e.code(),
             message: e.to_string(),
+            preview: None,
         });
     }
     if let Some(m) = &load.manifest {
@@ -461,6 +655,7 @@ pub fn check_draft(git: &Git, dir: &Path, provenance_json: &str) -> Result<Check
                                 field: block_field(i, w.field),
                                 code: w.code,
                                 message: w.message,
+                                preview: None,
                             });
                         }
                     }
@@ -470,6 +665,7 @@ pub fn check_draft(git: &Git, dir: &Path, provenance_json: &str) -> Result<Check
                         field: block_field(i, e.field()),
                         code: e.code(),
                         message: e.to_string(),
+                        preview: None,
                     }),
                     Err(other) => return Err(other),
                 }

@@ -12,6 +12,9 @@ pub const MAX_EDGES: usize = 80;
 pub const MAX_PARTICIPANTS: usize = 12;
 /// Deepest accepted subgraph nesting.
 pub const MAX_NESTING: usize = 3;
+/// Most `subgraph` words accepted in a flowchart source (a plain count,
+/// checked before parsing because parse time doubles per nesting level).
+pub const MAX_SUBGRAPHS: usize = 12;
 /// Longest accepted label, in Unicode scalar values.
 pub const MAX_LABEL_CHARS: usize = 60;
 /// Largest accepted rendered output, in bytes.
@@ -25,6 +28,7 @@ pub enum Limit {
     Edges,
     Participants,
     Nesting,
+    Subgraphs,
     LabelChars,
     OutputBytes,
 }
@@ -38,6 +42,7 @@ impl Limit {
             Limit::Edges => "edges",
             Limit::Participants => "participants",
             Limit::Nesting => "nesting",
+            Limit::Subgraphs => "subgraphs",
             Limit::LabelChars => "label_chars",
             Limit::OutputBytes => "output_bytes",
         }
@@ -51,6 +56,7 @@ impl Limit {
             Limit::Edges => MAX_EDGES,
             Limit::Participants => MAX_PARTICIPANTS,
             Limit::Nesting => MAX_NESTING,
+            Limit::Subgraphs => MAX_SUBGRAPHS,
             Limit::LabelChars => MAX_LABEL_CHARS,
             Limit::OutputBytes => MAX_OUTPUT_BYTES,
         }

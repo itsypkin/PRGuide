@@ -2,7 +2,9 @@
 
 use std::any::Any;
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Once;
 
 use ::mmdflux::graph::Graph;
 use ::mmdflux::payload::Diagram;
@@ -23,11 +25,56 @@ pub struct MmdfluxRenderer;
 
 impl Renderer for MmdfluxRenderer {
     fn render(&self, src: &str, opts: &RenderOpts) -> Result<TextDiagram, RenderError> {
+        INSTALL.call_once(|| {
+            let previous = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                if !QUIET.try_with(Cell::get).unwrap_or(false) {
+                    previous(info);
+                }
+            }));
+        });
         limits::check(Limit::SourceBytes, src.len())?;
-        match catch_unwind(AssertUnwindSafe(|| pipeline(src, opts))) {
+        let src = normalise_source(src);
+        let guard = QuietGuard::new();
+        let caught = catch_unwind(AssertUnwindSafe(|| pipeline(&src, opts)));
+        drop(guard);
+        match caught {
             Ok(result) => result,
             Err(payload) => Err(RenderError::Panic(panic_message(payload.as_ref()))),
         }
+    }
+}
+
+static INSTALL: Once = Once::new();
+
+thread_local! {
+    /// True while this thread is inside a render's `catch_unwind`.
+    static QUIET: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Silences the panic hook for the render on this thread; resets on drop.
+struct QuietGuard;
+
+impl QuietGuard {
+    fn new() -> Self {
+        QUIET.with(|q| q.set(true));
+        QuietGuard
+    }
+}
+
+impl Drop for QuietGuard {
+    fn drop(&mut self) {
+        let _ = QUIET.try_with(|q| q.set(false));
+    }
+}
+
+/// Strips one leading BOM, then turns every CRLF into LF; borrows when unchanged.
+fn normalise_source(src: &str) -> Cow<'_, str> {
+    let stripped = src.strip_prefix('\u{feff}').unwrap_or(src);
+    if stripped.contains("\r\n") {
+        Cow::Owned(stripped.replace("\r\n", "\n"))
+    } else {
+        Cow::Borrowed(stripped)
     }
 }
 
@@ -51,6 +98,11 @@ fn pipeline(src: &str, opts: &RenderOpts) -> Result<TextDiagram, RenderError> {
         || RenderError::Unsupported(first_keyword(src).unwrap_or_else(|| id.to_string()));
     if id != "flowchart" && id != "sequence" {
         return Err(unsupported());
+    }
+
+    if id == "flowchart" {
+        let subgraphs = src.to_ascii_lowercase().matches("subgraph").count();
+        limits::check(Limit::Subgraphs, subgraphs)?;
     }
 
     let text: Cow<'_, str> = match opts.root_direction {
@@ -88,6 +140,11 @@ fn pipeline(src: &str, opts: &RenderOpts) -> Result<TextDiagram, RenderError> {
         .map(|l| Line::raw(l.as_str()).width())
         .max()
         .unwrap_or(0);
+    if width == 0 {
+        return Err(RenderError::Invalid(
+            "empty diagram: nothing to draw; add nodes or messages".to_string(),
+        ));
+    }
     Ok(TextDiagram {
         height: lines.len(),
         width,
@@ -119,6 +176,15 @@ fn classify_undetected(src: &str) -> RenderError {
 }
 
 fn check_graph(graph: &Graph) -> Result<(), RenderError> {
+    if graph
+        .nodes
+        .keys()
+        .any(|k| k.eq_ignore_ascii_case("subgraph"))
+    {
+        return Err(RenderError::Invalid(
+            "`subgraph` was read as a node id: write `subgraph id[Title]` and its closing `end` each on their own line, or rename the node".to_string(),
+        ));
+    }
     limits::check(Limit::Nodes, graph.nodes.len())?;
     limits::check(Limit::Edges, graph.edges.len())?;
     let mut depth_max = 0;
@@ -148,7 +214,16 @@ fn check_graph(graph: &Graph) -> Result<(), RenderError> {
 
 fn check_sequence(seq: &Sequence) -> Result<(), RenderError> {
     limits::check(Limit::Participants, seq.participants.len())?;
-    let participant_labels = seq.participants.iter().map(|p| p.label.as_str());
+    let participant_labels = seq
+        .participants
+        .iter()
+        .map(|p| p.label.as_str())
+        .chain(seq.title.as_deref())
+        .chain(
+            seq.participant_boxes
+                .iter()
+                .filter_map(|b| b.label.as_deref()),
+        );
     let event_labels = seq.events.iter().filter_map(|e| match e {
         SequenceEvent::Message { text, .. } | SequenceEvent::Note { text, .. } => {
             Some(text.as_str())
@@ -282,12 +357,175 @@ pub fn rewrite_root_direction(src: &str, dir: RootDirection) -> Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
-    use super::panic_message;
+    use std::borrow::Cow;
+
+    use super::{MmdfluxRenderer, normalise_source, panic_message};
+    use crate::render::limits::Limit;
+    use crate::render::{Charset, RenderError, RenderOpts, Renderer, RootDirection, TextDiagram};
 
     #[test]
     fn panic_message_covers_every_payload_kind() {
         assert_eq!(panic_message(&"a"), "a");
         assert_eq!(panic_message(&String::from("b")), "b");
         assert_eq!(panic_message(&1u8), "unknown panic payload");
+    }
+
+    const CS: [Charset; 2] = [Charset::Unicode, Charset::Ascii];
+
+    fn go(src: &str, cs: Charset, flip: bool) -> Result<TextDiagram, RenderError> {
+        MmdfluxRenderer.render(
+            src,
+            &RenderOpts {
+                charset: cs,
+                root_direction: flip.then_some(RootDirection::TopDown),
+            },
+        )
+    }
+
+    fn assert_label_limit(r: Result<TextDiagram, RenderError>, actual: usize) {
+        match r {
+            Err(RenderError::TooLarge {
+                limit: Limit::LabelChars,
+                actual: a,
+                max: 60,
+            }) => assert_eq!(a, actual),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// R1 sequence_title_label_limit
+    #[test]
+    fn sequence_title_label_limit() {
+        let src = |t: &str| format!("sequenceDiagram\n  title {t}\n  A->>B: hi\n");
+        for cs in CS {
+            assert!(go(&src(&"t".repeat(60)), cs, false).is_ok());
+            assert!(go(&src(&"é".repeat(60)), cs, false).is_ok());
+            assert_label_limit(go(&src(&"t".repeat(61)), cs, false), 61);
+        }
+    }
+
+    /// R2 participant_box_label_limit
+    #[test]
+    fn participant_box_label_limit() {
+        let src = |b: &str| {
+            format!("sequenceDiagram\n  box Aqua {b}\n  participant A\n  end\n  A->>B: hi\n")
+        };
+        for cs in CS {
+            assert!(go(&src(&"b".repeat(60)), cs, false).is_ok());
+            assert_label_limit(go(&src(&"b".repeat(61)), cs, false), 61);
+        }
+        let two = format!(
+            "sequenceDiagram\n  box Aqua one\n  participant A\n  end\n  box Aqua {}\n  participant B\n  end\n  A->>B: hi\n",
+            "b".repeat(61)
+        );
+        let first_long = format!(
+            "sequenceDiagram\n  box Aqua {}\n  participant A\n  end\n  box Aqua one\n  participant B\n  end\n  A->>B: hi\n",
+            "b".repeat(61)
+        );
+        for cs in CS {
+            assert_label_limit(go(&two, cs, false), 61);
+            assert_label_limit(go(&first_long, cs, false), 61);
+        }
+    }
+
+    /// R3 crlf_front_matter_matches_lf
+    #[test]
+    fn crlf_front_matter_matches_lf() {
+        let lf = "---\nconfig:\n  flowchart:\n    x: 1\n---\ngraph LR\n  A --> B\n";
+        let crlf = lf.replace('\n', "\r\n");
+        for src in [
+            (lf, &crlf[..]),
+            ("graph LR\n  A --> B\n", "graph LR\r\n  A --> B\r\n"),
+        ] {
+            for cs in CS {
+                for flip in [false, true] {
+                    assert_eq!(go(src.0, cs, flip).unwrap(), go(src.1, cs, flip).unwrap());
+                }
+            }
+        }
+    }
+
+    /// R4 bom_stripped_once
+    #[test]
+    fn bom_stripped_once() {
+        for cs in CS {
+            for flip in [false, true] {
+                assert_eq!(
+                    go("\u{feff}graph LR\n  A --> B\n", cs, flip).unwrap(),
+                    go("graph LR\n  A --> B\n", cs, flip).unwrap()
+                );
+            }
+            match go("\u{feff}\u{feff}graph LR\n  A --> B\n", cs, false) {
+                Err(RenderError::Unsupported(k)) => assert_eq!(k, "\u{feff}graph"),
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    /// R5 size_limit_before_normalising
+    #[test]
+    fn size_limit_before_normalising() {
+        let mut s = String::from("graph LR\r\n  A --> B\r\n%%");
+        while s.len() < 8193 {
+            s.push('x');
+        }
+        for cs in CS {
+            match go(&s, cs, false) {
+                Err(RenderError::TooLarge {
+                    limit: Limit::SourceBytes,
+                    actual: 8193,
+                    max: 8192,
+                }) => {}
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    /// R6 unclosed_directive_then_pie
+    #[test]
+    fn unclosed_directive_then_pie() {
+        let e = go(
+            "%%{init: {\"theme\":\"dark\"}\npie\n  \"a\" : 1\n",
+            Charset::Unicode,
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(&e, RenderError::Unsupported(k) if k == "pie"));
+        assert_eq!(e.to_string(), "unsupported diagram type: pie");
+    }
+
+    /// R7 front_matter_closer_exact
+    #[test]
+    fn front_matter_closer_exact() {
+        let src = |c: &str| format!("---\ntitle: x\n{c}\ngraph LR\n  A --> B\n");
+        for c in ["----", "--- x"] {
+            let e = go(&src(c), Charset::Unicode, false).unwrap_err();
+            assert!(
+                matches!(&e, RenderError::Unsupported(k) if k == "---"),
+                "{c}: {e}"
+            );
+        }
+        for c in ["---", "  ---  "] {
+            let d = go(&src(c), Charset::Unicode, false).unwrap();
+            assert_eq!((d.width, d.height), (14, 3), "{c:?}");
+        }
+    }
+
+    /// R8 normalise_source_cases
+    #[test]
+    fn normalise_source_cases() {
+        let owned = |s: &str, want: &str| {
+            let got = normalise_source(s);
+            assert!(matches!(got, Cow::Owned(_)), "{s:?}");
+            assert_eq!(got, want);
+        };
+        owned("\u{feff}a\r\nb\rc", "a\nb\rc");
+        assert_eq!(normalise_source("\u{feff}\u{feff}x"), "\u{feff}x");
+        owned("\r\n\r\n", "\n\n");
+        for s in ["abc", "", "x\u{feff}", "a\rb"] {
+            let got = normalise_source(s);
+            assert!(matches!(got, Cow::Borrowed(_)), "{s:?}");
+            assert_eq!(got, s);
+        }
     }
 }
