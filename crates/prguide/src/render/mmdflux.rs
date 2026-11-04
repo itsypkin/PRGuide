@@ -182,7 +182,7 @@ fn check_graph(graph: &Graph) -> Result<(), RenderError> {
         .any(|k| k.eq_ignore_ascii_case("subgraph"))
     {
         return Err(RenderError::Invalid(
-            "a `subgraph` has no closing `end`".to_string(),
+            "a `subgraph` has no closing `end`, or a node is named `subgraph`: close the `subgraph` with `end`, or rename the node".to_string(),
         ));
     }
     limits::check(Limit::Nodes, graph.nodes.len())?;
