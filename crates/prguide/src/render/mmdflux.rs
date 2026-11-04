@@ -399,8 +399,13 @@ mod tests {
             "sequenceDiagram\n  box Aqua one\n  participant A\n  end\n  box Aqua {}\n  participant B\n  end\n  A->>B: hi\n",
             "b".repeat(61)
         );
+        let first_long = format!(
+            "sequenceDiagram\n  box Aqua {}\n  participant A\n  end\n  box Aqua one\n  participant B\n  end\n  A->>B: hi\n",
+            "b".repeat(61)
+        );
         for cs in CS {
             assert_label_limit(go(&two, cs, false), 61);
+            assert_label_limit(go(&first_long, cs, false), 61);
         }
     }
 

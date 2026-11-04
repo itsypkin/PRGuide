@@ -2404,6 +2404,35 @@ fn failing_supported_type_with_text_still_fails() {
         false,
         vec![big_d(153, 9, "", prev(&f5, U, None))],
     );
+    // ... nor the flipped path's rules.
+    let f10 = f10();
+    assert_report(
+        run_arch(Some(&f10), Some("[A]")),
+        false,
+        vec![big_d(
+            214,
+            3,
+            ", and 7 columns by 117 rows after LR→TD",
+            prev(&f10, U, None),
+        )],
+    );
+    let f11 = f11();
+    assert_report(
+        run_arch(Some(&f11), Some("[A]")),
+        true,
+        vec![wide_d(8, 83, " after LR→TD", prev(&f11, U, FLIP))],
+    );
+    let f12 = f12();
+    assert_report(
+        run_arch(Some(&f12), Some("[A]")),
+        false,
+        vec![big_d(
+            216,
+            159,
+            ", and after LR→TD it does not render in unicode (render_too_large)",
+            prev(&f12, U, None),
+        )],
+    );
 }
 
 /// D14 panic_is_diagram_render
@@ -2747,7 +2776,7 @@ fn ascii_only_failure() {
 
 /// K3 (cont.) the charsets fail with different errors
 #[test]
-fn ascii_only_failure_distinct_errors() {
+fn both_charsets_fail_with_their_own_errors() {
     let r = fake_src(|cs, _| match cs {
         Charset::Unicode => Err(RenderError::Invalid("u".into())),
         Charset::Ascii => Err(RenderError::Panic("a".into())),
@@ -2780,6 +2809,25 @@ fn flipped_ascii_failure() {
     );
 }
 
+/// K4 (cont.) the flipped ASCII error code is the error's own
+#[test]
+fn flipped_ascii_failure_code() {
+    let r = fake_src(|cs, d| match (cs, d) {
+        (A, Some(_)) => Err(RenderError::Invalid("x".into())),
+        (_, Some(_)) => fd(50, 50, true),
+        _ => fd(200, 10, false),
+    });
+    assert_eq!(
+        only(r, 4),
+        vec![big_d(
+            200,
+            10,
+            ", and after LR→TD it does not render in ascii (render_invalid)",
+            fake_prev(200, 10, 40)
+        )]
+    );
+}
+
 /// K5 flipped_unicode_error
 #[test]
 fn flipped_unicode_error() {
@@ -2797,6 +2845,24 @@ fn flipped_unicode_error() {
             200,
             10,
             ", and after LR→TD it does not render in unicode (render_too_large)",
+            fake_prev(200, 10, 40)
+        )]
+    );
+}
+
+/// K5 (cont.) the flipped Unicode error code is the error's own
+#[test]
+fn flipped_unicode_error_code() {
+    let r = fake_src(|_, d| match d {
+        Some(_) => Err(RenderError::Panic("p".into())),
+        None => fd(200, 10, false),
+    });
+    assert_eq!(
+        only(r, 3),
+        vec![big_d(
+            200,
+            10,
+            ", and after LR→TD it does not render in unicode (render_panic)",
             fake_prev(200, 10, 40)
         )]
     );
@@ -2884,6 +2950,87 @@ fn flip_fits_narrow() {
         }
     });
     assert_eq!(only(r, 4), vec![]);
+}
+
+/// K2 (cont.) the flipped rendering on the cap's edges
+#[test]
+fn flipped_cap_edges() {
+    let flip = |w: usize, h: usize| {
+        fake_src(move |_, d| {
+            if d.is_some() {
+                fd(w, h, true)
+            } else {
+                fd(200, 10, false)
+            }
+        })
+    };
+    assert_eq!(
+        only(flip(152, 108), 4),
+        vec![wide_d(8, 152, " after LR→TD", fake_prev(152, 108, 40))]
+    );
+    assert_eq!(
+        only(flip(1, 109), 3),
+        vec![big_d(
+            200,
+            10,
+            ", and 1 columns by 109 rows after LR→TD",
+            fake_prev(200, 10, 40)
+        )]
+    );
+    assert_eq!(
+        only(flip(153, 1), 3),
+        vec![big_d(
+            200,
+            10,
+            ", and 153 columns by 1 rows after LR→TD",
+            fake_prev(200, 10, 40)
+        )]
+    );
+}
+
+/// K7 (cont.) the flipped wide boundary at 77
+#[test]
+fn flipped_wide_77() {
+    let r = fake_src(|_, d| {
+        if d.is_some() {
+            fd(77, 5, true)
+        } else {
+            fd(200, 10, false)
+        }
+    });
+    assert_eq!(
+        only(r, 4),
+        vec![wide_d(8, 77, " after LR→TD", fake_prev(77, 5, 40))]
+    );
+}
+
+/// K8 (cont.) over the cap by height alone, flippable
+#[test]
+fn flip_fits_when_tall() {
+    let r = fake_src(|_, d| {
+        if d.is_some() {
+            fd(50, 50, true)
+        } else {
+            fd(100, 150, false)
+        }
+    });
+    assert_eq!(only(r, 4), vec![]);
+}
+
+/// K1 (cont.) the unsupported kind is printed as given
+#[test]
+fn unsupported_kind_as_given() {
+    let r = fake_src(|_, _| Err(RenderError::Unsupported("gantt".into())));
+    assert_eq!(
+        only(r, 1),
+        vec![dd(
+            Severity::Error,
+            AF,
+            "unsupported_needs_text",
+            m_unsupported(8, "gantt"),
+            Some("unsupported diagram type: gantt".into()),
+        )]
+    );
 }
 
 // ---- binary tests
