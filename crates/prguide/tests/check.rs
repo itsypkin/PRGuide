@@ -3133,3 +3133,122 @@ fn binary_drafts_dir_renamed_is_unknown() {
     assert_eq!(v["code"], "draft_unknown");
     assert_eq!(v["message"], draft_unknown_msg(&ctx.draft, &ctx.run));
 }
+
+/// Runs `prguide check` on the live binary with a kill deadline and returns
+/// the decoded diagnostics.
+fn bin_diagnostics(mermaid: &str) -> Vec<serde_json::Value> {
+    use std::process::{Command, Stdio};
+    let ctx = Ctx::live();
+    ctx.valid();
+    ctx.put("arch", &arch("arch", Some(mermaid), None));
+    let home = ctx.fx.path().join("home");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_prguide"))
+        .current_dir(&ctx.clone)
+        .arg("check")
+        .arg(&ctx.draft)
+        .args(["--run", &ctx.run])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
+        .env("PRGUIDE_HOME", &ctx.home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("prguide check did not return within 10 s");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let mut text = String::new();
+    std::io::Read::read_to_string(child.stdout.as_mut().unwrap(), &mut text).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    v["diagnostics"].as_array().unwrap().clone()
+}
+
+/// Asserts exactly an ascii and a unicode `diagram_render` error whose
+/// message ends with `(<code>): <err>`.
+fn assert_render_pair(src: &str, code: &str, err: &str) {
+    let d = bin_diagnostics(src);
+    assert_eq!(d.len(), 2, "{src:?}: {d:?}");
+    for (x, cs) in d.iter().zip(["ascii", "unicode"]) {
+        assert_eq!(x["code"], "diagram_render", "{src:?}");
+        assert_eq!(x["severity"], "error");
+        let want = format!("does not render in {cs} ({code}): {err}");
+        assert!(
+            x["message"].as_str().unwrap().ends_with(&want),
+            "{src:?}: {x}"
+        );
+        assert_eq!(x["preview"], err);
+    }
+}
+
+/// T1 deep_subgraph_nesting_returns
+#[test]
+fn deep_subgraph_nesting_returns() {
+    let src = format!("graph TD\n{}", "subgraph s\n".repeat(743));
+    assert_render_pair(
+        &src,
+        "render_too_large",
+        "diagram too large: 743 subgraphs (max 12)",
+    );
+}
+
+/// T2 subgraph_limit_boundary
+#[test]
+fn subgraph_limit_boundary() {
+    let shape = |n: usize| {
+        format!(
+            "graph TD\n{}A --> --> B\n{}",
+            "subgraph s\n".repeat(n),
+            "end\n".repeat(n)
+        )
+    };
+    let d = bin_diagnostics(&shape(12));
+    assert_eq!(d.len(), 2, "{d:?}");
+    for x in &d {
+        let m = x["message"].as_str().unwrap();
+        assert!(
+            m.contains("(render_invalid): invalid diagram: Parse error"),
+            "{m}"
+        );
+    }
+    assert_render_pair(
+        &shape(13),
+        "render_too_large",
+        "diagram too large: 13 subgraphs (max 12)",
+    );
+}
+
+/// T3 empty_diagrams_are_errors
+#[test]
+fn empty_diagrams_are_errors() {
+    let err = "invalid diagram: empty diagram: nothing to draw; add nodes or messages";
+    for src in [
+        "flowchart LR\n  %% TODO draw the store\n",
+        "sequenceDiagram\n  Agent calls prguide then waits\n",
+        "graph LR\n",
+        "sequenceDiagram\n  title Hello\n",
+        "graph LR\n  subgraph s[Empty]\n  end\n",
+    ] {
+        assert_render_pair(src, "render_invalid", err);
+    }
+    assert!(bin_diagnostics("graph LR\n  A\n").is_empty());
+    assert!(bin_diagnostics("sequenceDiagram\n  participant A\n").is_empty());
+}
+
+/// T4 unclosed_subgraph_is_error
+#[test]
+fn unclosed_subgraph_is_error() {
+    assert_render_pair(
+        "graph TD\n  subgraph s[Agent]\n    A --> B\n",
+        "render_invalid",
+        "invalid diagram: a `subgraph` has no closing `end`",
+    );
+    assert!(bin_diagnostics("graph TD\n  subgraph s[Agent]\n    A --> B\n  end\n").is_empty());
+}

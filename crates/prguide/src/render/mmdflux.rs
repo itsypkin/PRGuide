@@ -100,6 +100,11 @@ fn pipeline(src: &str, opts: &RenderOpts) -> Result<TextDiagram, RenderError> {
         return Err(unsupported());
     }
 
+    if id == "flowchart" {
+        let subgraphs = src.to_ascii_lowercase().matches("subgraph").count();
+        limits::check(Limit::Subgraphs, subgraphs)?;
+    }
+
     let text: Cow<'_, str> = match opts.root_direction {
         Some(dir) => rewrite_root_direction(src, dir),
         None => Cow::Borrowed(src),
@@ -135,6 +140,11 @@ fn pipeline(src: &str, opts: &RenderOpts) -> Result<TextDiagram, RenderError> {
         .map(|l| Line::raw(l.as_str()).width())
         .max()
         .unwrap_or(0);
+    if width == 0 {
+        return Err(RenderError::Invalid(
+            "empty diagram: nothing to draw; add nodes or messages".to_string(),
+        ));
+    }
     Ok(TextDiagram {
         height: lines.len(),
         width,
@@ -166,6 +176,15 @@ fn classify_undetected(src: &str) -> RenderError {
 }
 
 fn check_graph(graph: &Graph) -> Result<(), RenderError> {
+    if graph
+        .nodes
+        .keys()
+        .any(|k| k.eq_ignore_ascii_case("subgraph"))
+    {
+        return Err(RenderError::Invalid(
+            "a `subgraph` has no closing `end`".to_string(),
+        ));
+    }
     limits::check(Limit::Nodes, graph.nodes.len())?;
     limits::check(Limit::Edges, graph.edges.len())?;
     let mut depth_max = 0;

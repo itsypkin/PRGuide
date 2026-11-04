@@ -530,6 +530,7 @@ fn error_codes_are_stable() {
         (Limit::Edges, "edges"),
         (Limit::Participants, "participants"),
         (Limit::Nesting, "nesting"),
+        (Limit::Subgraphs, "subgraphs"),
         (Limit::LabelChars, "label_chars"),
         (Limit::OutputBytes, "output_bytes"),
     ] {
