@@ -1671,6 +1671,13 @@ fn finish_replaces_a_symbolic_ref_with_a_direct_one() {
 fn a_commit_does_not_write_through_a_symbolic_ref() {
     let ctx = Ctx::new();
     ctx.ok(&ctx.draft, None);
+    // Give v1's pin a different SHA than v2 will write, so an overwrite shows.
+    ctx.git()
+        .write_refs(&[(
+            "refs/prguide/7/v1/snapshot-head".to_owned(),
+            ctx.out.snapshot.base.clone(),
+        )])
+        .unwrap();
     let before = ctx.refs(1);
     plant_symref(
         &ctx,
