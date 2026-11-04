@@ -45,6 +45,9 @@ fn slide(id: &str, kind: &str, flags: &[&str]) -> String {
         }
     }
     s.push_str(&format!("---\nBody of {id}.\n"));
+    if kind == "architecture" {
+        s.push_str("\n```mermaid\nflowchart LR\n  A --> B\n```\n");
+    }
     s
 }
 
