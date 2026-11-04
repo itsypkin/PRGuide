@@ -1877,11 +1877,13 @@ mod tests {
         h.row.provenance_json = "garbage".into();
         let mut lock = versions::open_lock(h.store.dir()).unwrap();
         let _held = lock.write().unwrap();
-        let (h, err) = within_deadline(move || {
+        let (h, code, err) = within_deadline(move || {
             let mut h = h;
-            let err = expect_err(h.commit(None)).to_string();
-            (h, err)
+            let err = expect_err(h.commit(None));
+            let code = err.code();
+            (h, code, err.to_string())
         });
+        assert_eq!(code, "internal");
         assert!(
             err.contains("the drafts row's provenance_json does not parse: "),
             "{err}"
@@ -1896,11 +1898,13 @@ mod tests {
         });
         let mut lock = versions::open_lock(h.store.dir()).unwrap();
         let _held = lock.write().unwrap();
-        let (h, err) = within_deadline(move || {
+        let (h, code, err) = within_deadline(move || {
             let mut h = h;
-            let err = expect_err(h.commit(None)).to_string();
-            (h, err)
+            let err = expect_err(h.commit(None));
+            let code = err.code();
+            (h, code, err.to_string())
         });
+        assert_eq!(code, "internal");
         assert!(
             err.contains(
                 "the drafts row's provenance_json has selection kind commits but no commits"
@@ -2124,6 +2128,93 @@ mod tests {
         }
     }
 
+    /// Decided before any commit: does mode 000 on a scratch dir deny access?
+    fn mode_bites(root: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let probe = root.join("mode-probe");
+        fs::create_dir_all(probe.join("in")).unwrap();
+        fs::set_permissions(&probe, fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = fs::symlink_metadata(probe.join("in")).is_err();
+        fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).unwrap();
+        denied
+    }
+
+    /// R9: source-side I/O errors reject the copy as "changed while it was
+    /// being copied", naming the entry.
+    #[test]
+    fn copy_source_io_errors_are_rejections() {
+        use std::os::unix::fs::PermissionsExt;
+        type Target = fn(&Path) -> PathBuf;
+        let cases: Vec<(&str, Target, u32, &str)> = vec![
+            (
+                "unreadable slide",
+                |d| d.join("slides/step-one.md"),
+                0o000,
+                "slides/step-one.md",
+            ),
+            (
+                "unreadable slides dir",
+                |d| d.join("slides"),
+                0o000,
+                "slides",
+            ),
+            ("unreadable draft dir", |d| d.to_path_buf(), 0o000, "."),
+            // 0o444: read_dir works, the entry lstat does not.
+            (
+                "unsearchable draft dir",
+                |d| d.to_path_buf(),
+                0o444,
+                "guide.yaml",
+            ),
+            (
+                "unsearchable slides dir",
+                |d| d.join("slides"),
+                0o444,
+                "slides/overview.md",
+            ),
+        ];
+        for (name, target, mode, entry) in cases {
+            let h = H::new();
+            if !mode_bites(&h.root) {
+                return;
+            }
+            let t = target(&h.draft);
+            let _restore = RestoreMode(t.clone());
+            fs::set_permissions(&t, fs::Permissions::from_mode(mode)).unwrap();
+            let (h, out) = within_deadline(move || {
+                let mut h = h;
+                let got = h.commit(None);
+                let want = check_draft(&h.git, &h.draft, &h.row.provenance_json);
+                (h, (got, want))
+            });
+            let (got, want) = out;
+            let want_message = format!(
+                "prguide guide commit copies only guide.yaml and slides/<id>.md, and \
+                 `{entry}` changed while it was being copied; fix it and run prguide \
+                 guide commit again"
+            );
+            match (got, want) {
+                (
+                    Err(Error::Guide(GuideError::CheckFailed {
+                        message,
+                        diagnostics,
+                    })),
+                    Ok(w),
+                ) => {
+                    assert_eq!(message, want_message, "{name}");
+                    assert_eq!(
+                        serde_json::to_value(&diagnostics).unwrap(),
+                        serde_json::to_value(&w.diagnostics).unwrap(),
+                        "{name}"
+                    );
+                }
+                (got, _) => panic!("{name}: unexpected {:?}", got.map(|v| v.version)),
+            }
+            fs::set_permissions(&t, fs::Permissions::from_mode(0o755)).unwrap();
+            h.nothing_left(1);
+        }
+    }
+
     /// R4: a rollback that cannot lstat `staging/` stops before refs and row.
     #[test]
     fn a_rollback_that_cannot_inspect_staging_stops_early() {
@@ -2131,6 +2222,9 @@ mod tests {
         let mut h = H::new();
         let dir = h.store.dir().to_path_buf();
         let _restore = RestoreMode(dir.clone());
+        if !mode_bites(&h.root) {
+            return; // running as root: chmod denies nothing
+        }
         let d2 = dir.clone();
         fault::set(move |p| {
             if p == Point::AfterPin {
@@ -2141,10 +2235,7 @@ mod tests {
         let err = expect_err(h.commit(None));
         fault::clear();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
-        if err.code() != "store_io" {
-            // Permissions did not bite (running as root): nothing to test.
-            return;
-        }
+        assert_eq!(err.code(), "store_io", "{err}");
         assert_eq!(h.state_of(1).as_deref(), Some("staging"));
         let mut want = h.pairs(1);
         want.sort();
