@@ -1646,6 +1646,11 @@ fn rollback_does_not_follow_a_symbolic_ref() {
     ctx.insert_version(2, "staging", None, &json.to_string());
     assert_eq!(ctx.bin_status().status.code(), Some(0));
     assert_eq!(ctx.refs(1), before);
+    assert!(!is_symref(&ctx, name));
+    assert_eq!(
+        ctx.count("SELECT COUNT(*) FROM guide_versions WHERE version = 2"),
+        0
+    );
 }
 
 #[test]
@@ -1656,11 +1661,17 @@ fn finish_replaces_a_symbolic_ref_with_a_direct_one() {
     let name = "refs/prguide/7/v2/snapshot-head";
     plant_symref(&ctx, name, "refs/prguide/7/v1/snapshot-head");
     fs::create_dir_all(ctx.sdir().join("guides/v2")).unwrap();
-    let json = serde_json::json!([{"name": name, "sha": before[0].1}]);
+    // The row's SHA equals the symref's target value, so only rewriting
+    // every ref (not just mismatches) replaces the symref.
+    let json = serde_json::json!([{"name": name, "sha": ctx.out.snapshot.head}]);
     ctx.insert_version(2, "staging", None, &json.to_string());
     assert_eq!(ctx.bin_status().status.code(), Some(0));
     assert_eq!(ctx.refs(1), before);
     assert!(!is_symref(&ctx, name));
+    assert!(
+        ctx.refs(2)
+            .contains(&(name.to_owned(), ctx.out.snapshot.head.clone()))
+    );
     assert_eq!(
         ctx.count("SELECT COUNT(*) FROM guide_versions WHERE version = 2 AND state = 'ready'"),
         1
@@ -1720,4 +1731,68 @@ fn reconcile_guard_checks_every_ref_and_the_version_boundary() {
             .execute("DELETE FROM guide_versions WHERE version = 2", [])
             .unwrap();
     }
+}
+
+fn link_dir(ctx: &Ctx, link: &str, target: &str) {
+    symlink(target, ctx.clone.join(".git").join(link)).unwrap();
+}
+
+#[test]
+fn reconcile_does_not_delete_through_a_linked_ref_directory() {
+    let ctx = Ctx::new();
+    ctx.ok(&ctx.draft, None);
+    let before = ctx.refs(1);
+    link_dir(&ctx, "refs/prguide/7/v2", "v1");
+    let json = serde_json::json!([{"name": "refs/prguide/7/v2/snapshot-head", "sha": before[0].1}]);
+    ctx.insert_version(2, "staging", None, &json.to_string());
+    assert_eq!(ctx.bin_status().status.code(), Some(0));
+    assert_eq!(ctx.refs(1), before);
+    assert_eq!(
+        ctx.count("SELECT COUNT(*) FROM guide_versions WHERE version = 2 AND state = 'staging'"),
+        1
+    );
+}
+
+#[test]
+fn a_failed_publish_does_not_delete_through_a_linked_ref_directory() {
+    let ctx = Ctx::new();
+    ctx.ok(&ctx.draft, None);
+    let before = ctx.refs(1);
+    link_dir(&ctx, "refs/prguide/7/v2", "v1");
+    fs::remove_dir_all(ctx.sdir().join("guides")).unwrap();
+    fs::write(ctx.sdir().join("guides"), "x").unwrap();
+    assert_eq!(ctx.err(&ctx.draft, None).code(), "invalid_ref");
+    assert_eq!(ctx.refs(1), before);
+}
+
+#[test]
+fn a_commit_does_not_write_through_a_linked_ref_directory() {
+    let ctx = Ctx::new();
+    ctx.ok(&ctx.draft, None);
+    ctx.git()
+        .write_refs(&[(
+            "refs/prguide/7/v1/snapshot-head".to_owned(),
+            ctx.out.snapshot.base.clone(),
+        )])
+        .unwrap();
+    let before = ctx.refs(1);
+    link_dir(&ctx, "refs/prguide/7/v2", "v1");
+    assert_eq!(ctx.err(&ctx.draft, None).code(), "invalid_ref");
+    assert_eq!(ctx.refs(1), before);
+    fs::remove_file(ctx.clone.join(".git/refs/prguide/7/v2")).unwrap();
+    assert_eq!(ctx.ok(&ctx.draft, None).version, 2);
+    assert_eq!(ctx.refs(1), before);
+}
+
+#[test]
+fn a_linked_higher_ref_directory_is_refused() {
+    let ctx = Ctx::new();
+    let other = "refs/prguide/8/fetch/head".to_owned();
+    ctx.git()
+        .write_refs(&[(other, ctx.out.snapshot.head.clone())])
+        .unwrap();
+    let _ = fs::remove_dir_all(ctx.clone.join(".git/refs/prguide/7"));
+    link_dir(&ctx, "refs/prguide/7", "8");
+    assert_eq!(ctx.err(&ctx.draft, None).code(), "invalid_ref");
+    assert_eq!(ctx.git().list_refs("refs/prguide/8").unwrap().len(), 1);
 }
