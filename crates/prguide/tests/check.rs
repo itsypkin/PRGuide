@@ -3245,14 +3245,19 @@ fn empty_diagrams_are_errors() {
 /// T4 unclosed_subgraph_is_error
 #[test]
 fn unclosed_subgraph_is_error() {
-    let msg = "invalid diagram: a `subgraph` has no closing `end`, or a node is named `subgraph`: close the `subgraph` with `end`, or rename the node";
+    let msg = "invalid diagram: `subgraph` was read as a node id: write `subgraph id[Title]` and its closing `end` each on their own line, or rename the node";
     for src in [
         "graph TD\n  subgraph s[Agent]\n    A --> B\n",
         "graph LR\n  Graph --> Subgraph --> Node\n",
         "graph TD\n  subgraph s[Group]\n    A --> SubGraph[Worker]\n  end\n",
         "graph TD\n  SUBGRAPH s[Agent]\n    A --> B\n",
+        "graph TD\n  subgraph Payment Service\n    P --> Q\n  end\n",
+        "graph TD\n  subgraph s[Agent]\n    A --> B\n  end %% done\n",
     ] {
         assert_render_pair(src, "render_invalid", msg);
     }
     assert!(bin_diagnostics("graph TD\n  subgraph s[Agent]\n    A --> B\n  end\n").is_empty());
+    assert!(
+        bin_diagnostics("graph TD\n  subgraph p[Payment Service]\n    P --> Q\n  end\n").is_empty()
+    );
 }
