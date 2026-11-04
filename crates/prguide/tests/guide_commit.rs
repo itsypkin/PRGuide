@@ -1613,3 +1613,104 @@ fn a_symlinked_commit_lock_creates_nothing_outside() {
     assert_eq!(err.code(), "store_io");
     assert!(!exists(&target));
 }
+
+fn plant_symref(ctx: &Ctx, name: &str, target: &str) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&ctx.clone)
+        .args(["symbolic-ref", name, target])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+}
+
+fn is_symref(ctx: &Ctx, name: &str) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(&ctx.clone)
+        .args(["symbolic-ref", "-q", name])
+        .output()
+        .unwrap()
+        .status
+        .success()
+}
+
+#[test]
+fn rollback_does_not_follow_a_symbolic_ref() {
+    let ctx = Ctx::new();
+    ctx.ok(&ctx.draft, None);
+    let before = ctx.refs(1);
+    let name = "refs/prguide/7/v2/snapshot-head";
+    plant_symref(&ctx, name, "refs/prguide/7/v1/snapshot-head");
+    let json = serde_json::json!([{"name": name, "sha": before[0].1}]);
+    ctx.insert_version(2, "staging", None, &json.to_string());
+    assert_eq!(ctx.bin_status().status.code(), Some(0));
+    assert_eq!(ctx.refs(1), before);
+}
+
+#[test]
+fn finish_replaces_a_symbolic_ref_with_a_direct_one() {
+    let ctx = Ctx::new();
+    ctx.ok(&ctx.draft, None);
+    let before = ctx.refs(1);
+    let name = "refs/prguide/7/v2/snapshot-head";
+    plant_symref(&ctx, name, "refs/prguide/7/v1/snapshot-head");
+    fs::create_dir_all(ctx.sdir().join("guides/v2")).unwrap();
+    let json = serde_json::json!([{"name": name, "sha": before[0].1}]);
+    ctx.insert_version(2, "staging", None, &json.to_string());
+    assert_eq!(ctx.bin_status().status.code(), Some(0));
+    assert_eq!(ctx.refs(1), before);
+    assert!(!is_symref(&ctx, name));
+    assert_eq!(
+        ctx.count("SELECT COUNT(*) FROM guide_versions WHERE version = 2 AND state = 'ready'"),
+        1
+    );
+}
+
+#[test]
+fn a_commit_does_not_write_through_a_symbolic_ref() {
+    let ctx = Ctx::new();
+    ctx.ok(&ctx.draft, None);
+    let before = ctx.refs(1);
+    plant_symref(
+        &ctx,
+        "refs/prguide/7/v2/snapshot-head",
+        "refs/prguide/7/v1/snapshot-head",
+    );
+    let v = ctx.ok(&ctx.draft, None);
+    assert_eq!(v.version, 2);
+    assert_eq!(ctx.refs(1), before);
+}
+
+#[test]
+fn reconcile_guard_checks_every_ref_and_the_version_boundary() {
+    let ctx = Ctx::new();
+    ctx.ok(&ctx.draft, None);
+    let sha = ctx.out.snapshot.head.clone();
+    let foreign = "refs/prguide/8/fetch/head".to_owned();
+    ctx.git()
+        .write_refs(&[(foreign.clone(), sha.clone())])
+        .unwrap();
+    let own = "refs/prguide/7/v2/snapshot-head";
+    let near = "refs/prguide/7/v20/x";
+    ctx.git()
+        .write_refs(&[(near.to_owned(), sha.clone())])
+        .unwrap();
+    for names in [
+        [own, foreign.as_str()],
+        [foreign.as_str(), own],
+        [own, near],
+    ] {
+        let json: Vec<_> = names
+            .iter()
+            .map(|n| serde_json::json!({"name": n, "sha": sha}))
+            .collect();
+        ctx.insert_version(2, "staging", None, &serde_json::to_string(&json).unwrap());
+        assert_eq!(ctx.bin_status().status.code(), Some(0));
+        assert_eq!(ctx.git().list_refs("refs/prguide/8").unwrap().len(), 1);
+        assert_eq!(ctx.git().list_refs("refs/prguide/7/v20").unwrap().len(), 1);
+        ctx.raw()
+            .execute("DELETE FROM guide_versions WHERE version = 2", [])
+            .unwrap();
+    }
+}

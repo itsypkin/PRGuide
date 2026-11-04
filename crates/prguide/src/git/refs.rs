@@ -75,7 +75,7 @@ impl Git {
             .iter()
             .map(|(n, s)| format!("update {n} {s}\n"))
             .collect::<String>();
-        self.run_with_stdin(["update-ref", "--stdin"], input.as_bytes())
+        self.run_with_stdin(["update-ref", "--no-deref", "--stdin"], input.as_bytes())
             .map(|_| ())
     }
     /// Return all missing or mismatched refs in input order.
@@ -116,7 +116,7 @@ impl Git {
             .iter()
             .map(|n| format!("delete {n}\n"))
             .collect::<String>();
-        self.run_with_stdin(["update-ref", "--stdin"], input.as_bytes())
+        self.run_with_stdin(["update-ref", "--no-deref", "--stdin"], input.as_bytes())
             .map(|_| ())
     }
     /// List refs below a namespace boundary, sorted by name.

@@ -336,12 +336,9 @@ pub fn reconcile(store: &mut Store, git: &Git) -> Result<(), Error> {
             .iter()
             .map(|r| (r.name.clone(), r.sha.clone()))
             .collect();
-        let bad: Vec<(String, String)> = git
-            .verify_refs(&wanted)?
-            .into_iter()
-            .map(|m| (m.name, m.expected))
-            .collect();
-        git.write_refs(&bad)?;
+        // Write every ref, not only the mismatches: a symbolic ref reads as
+        // clean through `verify_refs`, and `--no-deref` replaces it with a direct one.
+        git.write_refs(&wanted)?;
         fault_point!(FinishAfterRefs);
         let now = store.now();
         let caused_by = row.caused_by.clone();
