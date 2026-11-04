@@ -2215,6 +2215,63 @@ mod tests {
         }
     }
 
+    /// R9: a draft dir that is gone when the copy starts is rejected as
+    /// "changed while it was being copied" naming `.`.
+    #[test]
+    fn copy_rejects_a_draft_dir_that_vanished() {
+        let mut h = H::new();
+        let e = h.e();
+        fs::rename(&h.draft, h.root.join("moved")).unwrap();
+        let got = h.commit(Some(&e));
+        let want = check_draft(&h.git, &h.draft, &h.row.provenance_json).unwrap();
+        match got {
+            Err(Error::Guide(GuideError::CheckFailed {
+                message,
+                diagnostics,
+            })) => {
+                assert_eq!(
+                    message,
+                    "prguide guide commit copies only guide.yaml and slides/<id>.md, and \
+                     `.` changed while it was being copied; fix it and run prguide guide \
+                     commit again"
+                );
+                assert_eq!(
+                    serde_json::to_value(&diagnostics).unwrap(),
+                    serde_json::to_value(&want.diagnostics).unwrap()
+                );
+            }
+            other => panic!("unexpected {:?}", other.map(|v| v.version)),
+        }
+        h.nothing_left(1);
+        assert_eq!(h.event_row(), h.claimed());
+    }
+
+    /// N1: `created_at` is the reserve time, `ready_at` and the event's
+    /// `done_at` are the finish time.
+    #[test]
+    fn finish_stamps_ready_at_and_done_at_with_the_finish_time() {
+        let mut h = H::new();
+        let t1 = h.store.now().to_rfc3339();
+        crash_at(Point::AfterPublish);
+        let e = h.e();
+        expect_err(h.commit(Some(&e)));
+        fault::clear();
+        h.clock.advance(Duration::from_secs(1));
+        let t2 = h.store.now().to_rfc3339();
+        assert_ne!(t1, t2);
+        let v = h.commit(Some(&e)).unwrap();
+        assert_eq!(v.version, 1);
+        assert_eq!(v.created_at, t1);
+        assert_eq!(v.ready_at.as_deref(), Some(t2.as_str()));
+        let done_at: String = h
+            .raw()
+            .query_row("SELECT done_at FROM events WHERE id = ?1", [&e], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(done_at, t2);
+    }
+
     /// R4: a rollback that cannot lstat `staging/` stops before refs and row.
     #[test]
     fn a_rollback_that_cannot_inspect_staging_stops_early() {

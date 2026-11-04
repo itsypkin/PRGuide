@@ -778,6 +778,7 @@ fn binary_check_failed_refuses() {
         "the draft has 1 error(s); fix them and run prguide guide commit again"
     );
     assert_eq!(v["diagnostics"].as_array().unwrap().len(), 2);
+    ctx.nothing_left(1, 0, 0);
     let checked = ctx.bin_check(&ctx.draft);
     let c: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
     assert_eq!(v["diagnostics"], c["diagnostics"]);
@@ -845,6 +846,7 @@ fn copy_rejects_a_symlinked_slide() {
     symlink(&outside, ctx.draft.join("slides/extra.md")).unwrap();
     let (message, diags) = check_failed(ctx.err(&ctx.draft, None));
     assert_eq!(message, copy_message("slides/extra.md", "is a symlink"));
+    ctx.nothing_left(1, 0, 0);
     assert_eq!(diags, ctx.check_diags(&ctx.draft));
     assert!(codes(&diags).contains(&"symlink_not_allowed".to_owned()));
     ctx.nothing_left(1, 0, 0);
@@ -1247,7 +1249,7 @@ fn binary_commit_waits_for_the_lock() {
     let mut lock = versions::open_lock(&ctx.sdir()).unwrap();
     let guard = lock.write().unwrap();
     let (pid, rx) = spawn_capped(&mut ctx.bin_commit_cmd(&ctx.clone, &ctx.draft, None));
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(3000));
     assert!(rx.try_recv().is_err());
     assert_eq!(ctx.rows(), 0);
     let conn = ctx.raw();

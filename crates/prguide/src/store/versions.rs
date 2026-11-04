@@ -262,7 +262,7 @@ fn io(path: &Path) -> impl Fn(std::io::Error) -> StoreError + '_ {
 
 /// True for a real directory (not a symlink), false for a missing path or
 /// anything else; any other lstat error is an error.
-fn is_real_dir_or_absent(path: &Path) -> Result<bool, StoreError> {
+fn is_real_dir(path: &Path) -> Result<bool, StoreError> {
     match fs::symlink_metadata(path) {
         Ok(meta) => Ok(meta.is_dir()),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
@@ -277,7 +277,7 @@ pub fn rollback(store: &mut Store, git: &Git, k: i64, refs: &[PinnedRef]) -> Res
     // Only remove through a real `staging/` directory: removing through a
     // symlinked parent would delete data outside the store.
     let parent = store.dir().join("staging");
-    let parent_is_real = is_real_dir_or_absent(&parent)?;
+    let parent_is_real = is_real_dir(&parent)?;
     if parent_is_real {
         match fs::remove_dir_all(&staging) {
             Ok(()) => {}
@@ -312,7 +312,7 @@ pub fn reconcile(store: &mut Store, git: &Git) -> Result<(), Error> {
         };
         // `guides/` itself must be a real directory, or `guides/v<k>` may
         // live outside the store.
-        let guides_real = is_dir && is_real_dir_or_absent(&store_dir.join("guides"))?;
+        let guides_real = is_dir && is_real_dir(&store_dir.join("guides"))?;
         if !guides_real {
             rollback(store, git, row.version, &row.refs)?;
             continue;
