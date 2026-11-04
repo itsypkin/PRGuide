@@ -51,6 +51,37 @@ fn valid_sha(name: &str, sha: &str) -> Result<(), GitError> {
     }
     Ok(())
 }
+/// Refuse names whose parent directories under the git directory are symlinks:
+/// `--no-deref` protects only the leaf ref, git still follows a linked parent.
+fn no_linked_parents(git: &Git, names: &[&String]) -> Result<(), GitError> {
+    let out = git.run(["rev-parse", "--git-common-dir"])?;
+    let text = String::from_utf8_lossy(&out);
+    let common = git.dir().join(text.trim());
+    for name in names {
+        let parts: Vec<&str> = name.split('/').collect();
+        let mut path = common.clone();
+        for part in &parts[..parts.len() - 1] {
+            path.push(part);
+            match std::fs::symlink_metadata(&path) {
+                Ok(m) if m.file_type().is_symlink() => {
+                    return Err(GitError::InvalidRef {
+                        name: (*name).clone(),
+                        reason: "a directory in this ref's path is a symlink; prguide does not write refs through a link".into(),
+                    });
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                Err(e) => {
+                    return Err(GitError::InvalidRef {
+                        name: (*name).clone(),
+                        reason: format!("cannot inspect the ref's directory: {e}"),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
 fn parse_refs(bytes: &[u8]) -> Vec<(String, String)> {
     String::from_utf8_lossy(bytes)
         .lines()
@@ -71,11 +102,12 @@ impl Git {
         if refs.is_empty() {
             return Ok(());
         }
+        no_linked_parents(self, &refs.iter().map(|(n, _)| n).collect::<Vec<_>>())?;
         let input = refs
             .iter()
             .map(|(n, s)| format!("update {n} {s}\n"))
             .collect::<String>();
-        self.run_with_stdin(["update-ref", "--stdin"], input.as_bytes())
+        self.run_with_stdin(["update-ref", "--no-deref", "--stdin"], input.as_bytes())
             .map(|_| ())
     }
     /// Return all missing or mismatched refs in input order.
@@ -112,11 +144,12 @@ impl Git {
         if names.is_empty() {
             return Ok(());
         }
+        no_linked_parents(self, &names.iter().collect::<Vec<_>>())?;
         let input = names
             .iter()
             .map(|n| format!("delete {n}\n"))
             .collect::<String>();
-        self.run_with_stdin(["update-ref", "--stdin"], input.as_bytes())
+        self.run_with_stdin(["update-ref", "--no-deref", "--stdin"], input.as_bytes())
             .map(|_| ())
     }
     /// List refs below a namespace boundary, sorted by name.

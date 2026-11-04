@@ -122,7 +122,7 @@ fn insert_ready_version(store: &mut Store, version: i64, head: &str) {
         &format!(
             "INSERT INTO guide_versions(version,state,caused_by,snapshot_base,snapshot_head,\
              selection_kind,selection_base,selection_head,commits_json,refs_json,created_at,ready_at) \
-             VALUES({version},'ready',NULL,'sb','{head}','full','xb','xh','[]','{{}}','t','2026-01-01T00:00:00.000Z')"
+             VALUES({version},'ready',NULL,'sb','{head}','full','xb','xh','[]','[]','t','2026-01-01T00:00:00.000Z')"
         ),
     );
 }
@@ -559,9 +559,9 @@ fn status_report_lists_ready_versions_oldest_first() {
         &mut store,
         "INSERT INTO guide_versions(version,state,caused_by,snapshot_base,snapshot_head,\
          selection_kind,selection_base,selection_head,commits_json,refs_json,created_at,ready_at) VALUES \
-         (1,'ready',NULL,'sb1','sh1','full','xb1','xh1','[]','{}','c1','r1'),\
-         (2,'staging',NULL,'sb2','sh2','full','xb2','xh2','[]','{}','c2',NULL),\
-         (3,'ready',NULL,'sb3','sh3','commits','xb3','xh3','[]','{}','c3','r3')",
+         (1,'ready',NULL,'sb1','sh1','full','xb1','xh1','[]','[]','c1','r1'),\
+         (2,'staging',NULL,'sb2','sh2','full','xb2','xh2','[]','[]','c2',NULL),\
+         (3,'ready',NULL,'sb3','sh3','commits','xb3','xh3','[]','[]','c3','r3')",
     );
     let report = status::status_report(&mut store).expect("report");
     let version = |n: i64, kind: &str| ReadyVersion {
@@ -679,7 +679,7 @@ fn cli_status_not_listening_snapshot() {
         &mut store,
         "INSERT INTO guide_versions(version,state,caused_by,snapshot_base,snapshot_head,\
          selection_kind,selection_base,selection_head,commits_json,refs_json,created_at,ready_at) \
-         VALUES(2,'staging',NULL,'sb','h2','full','xb','xh','[]','{}','t',NULL)",
+         VALUES(2,'staging',NULL,'sb','h2','full','xb','xh','[]','[]','t',NULL)",
     );
     let output = status_out(&home, &run);
     insta::assert_snapshot!("cli_not_listening", redacted_stdout(&output, &run));

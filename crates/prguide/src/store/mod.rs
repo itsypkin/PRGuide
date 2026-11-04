@@ -238,12 +238,14 @@ impl Store {
         let foreign_keys: i64 = conn.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
         require_pragma("foreign_keys", &foreign_keys.to_string(), "1")?;
         migrations::migrate(&mut conn, migrations::MIGRATIONS)?;
-        Ok(Self {
+        let mut store = Self {
             dir,
             pr: pr.clone(),
             conn,
             clock: Arc::new(SystemClock),
-        })
+        };
+        versions::reconcile_on_open(&mut store);
+        Ok(store)
     }
 
     /// Opens the store of the PR that run `run_id` belongs to.

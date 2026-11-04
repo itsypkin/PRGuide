@@ -4,7 +4,7 @@ use std::{fs::OpenOptions, io::ErrorKind};
 
 use serde::Serialize;
 
-use super::{Store, StoreError, events, runs, runs::RunId};
+use super::{Store, StoreError, events, runs, runs::RunId, versions};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -51,6 +51,7 @@ pub fn agent_status(store: &mut Store) -> Result<AgentStatus, StoreError> {
 
 pub fn status_report(store: &mut Store) -> Result<StatusReport, StoreError> {
     let clock = store.clock();
+    let dir = store.dir().to_path_buf();
     let (active, claimed, pending, guide_versions) = store.tx(|tx| {
         let now = clock.now();
         let active = runs::active_run(tx, now)?;
@@ -67,26 +68,18 @@ pub fn status_report(store: &mut Store) -> Result<StatusReport, StoreError> {
             [],
             |row| row.get(0),
         )?;
-        let mut stmt = tx.prepare(
-            "SELECT version, selection_kind, snapshot_base, snapshot_head, selection_base, \
-             selection_head, ready_at FROM guide_versions WHERE state = 'ready' \
-             ORDER BY version",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(ReadyVersion {
-                version: row.get(0)?,
-                selection_kind: row.get(1)?,
-                snapshot_base: row.get(2)?,
-                snapshot_head: row.get(3)?,
-                selection_base: row.get(4)?,
-                selection_head: row.get(5)?,
-                ready_at: row.get(6)?,
+        let versions = versions::ready(tx, &dir)?
+            .into_iter()
+            .map(|v| ReadyVersion {
+                version: v.version,
+                selection_kind: v.selection.kind,
+                snapshot_base: v.snapshot.base,
+                snapshot_head: v.snapshot.head,
+                selection_base: v.selection.base,
+                selection_head: v.selection.head,
+                ready_at: v.ready_at,
             })
-        })?;
-        let mut versions = Vec::new();
-        for row in rows {
-            versions.push(row?);
-        }
+            .collect::<Vec<_>>();
         Ok::<_, StoreError>((active, claimed, pending, versions))
     })?;
     let (claimed, pending) = (count(claimed), count(pending));

@@ -21,6 +21,13 @@ pub enum GuideError {
     NoBaseCommit(String),
     #[error("{0}")]
     StoreBound(String),
+    #[error("{message}")]
+    CheckFailed {
+        message: String,
+        diagnostics: Vec<check::Diagnostic>,
+    },
+    #[error("{0}")]
+    EventCommandMismatch(String),
     #[error("{0}")]
     PrHeadMoved(String),
     #[error("{0}")]
@@ -264,6 +271,8 @@ impl GuideError {
             Self::RangeHasMerge(_) => "range_has_merge",
             Self::NoBaseCommit(_) => "no_base_commit",
             Self::StoreBound(_) => "store_bound",
+            Self::CheckFailed { .. } => "check_failed",
+            Self::EventCommandMismatch(_) => "event_command_mismatch",
             Self::PrHeadMoved(_) => "pr_head_moved",
             Self::CommitAmbiguous(_) => "commit_ambiguous",
             Self::YamlInvalid { .. } => "yaml_invalid",
@@ -324,6 +333,8 @@ impl GuideError {
             | Self::RangeHasMerge(_)
             | Self::NoBaseCommit(_)
             | Self::StoreBound(_)
+            | Self::CheckFailed { .. }
+            | Self::EventCommandMismatch(_)
             | Self::PrHeadMoved(_)
             | Self::CommitAmbiguous(_)
             | Self::DraftUnknown(_) => None,
@@ -390,6 +401,17 @@ mod tests {
         );
         for (error, code) in [
             (GuideError::StoreBound(String::new()), "store_bound"),
+            (
+                GuideError::CheckFailed {
+                    message: String::new(),
+                    diagnostics: Vec::new(),
+                },
+                "check_failed",
+            ),
+            (
+                GuideError::EventCommandMismatch(String::new()),
+                "event_command_mismatch",
+            ),
             (GuideError::PrHeadMoved(String::new()), "pr_head_moved"),
             (
                 GuideError::CommitAmbiguous(String::new()),

@@ -25,6 +25,7 @@ use crate::{
     store::{
         Clock, PrRef, Store, StoreError, SystemClock, prguide_home,
         runs::{self, RunId},
+        versions,
     },
 };
 
@@ -372,33 +373,20 @@ fn bind_store_meta(
     })
 }
 
-/// Ready guide versions, oldest first. Future home: T3-4's `store/versions.rs`.
+/// Ready guide versions, oldest first.
 fn ready_guide_versions(store: &mut Store) -> Result<Vec<GuideVersionOut>, Error> {
-    store.tx(|tx| {
-        let mut stmt = tx
-            .prepare(
-                "SELECT version, selection_kind, snapshot_base, snapshot_head, selection_base, \
-                 selection_head, ready_at FROM guide_versions WHERE state = 'ready' \
-                 ORDER BY version",
-            )
-            .map_err(StoreError::from)?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(GuideVersionOut {
-                    version: row.get(0)?,
-                    selection_kind: row.get(1)?,
-                    snapshot_base: row.get(2)?,
-                    snapshot_head: row.get(3)?,
-                    selection_base: row.get(4)?,
-                    selection_head: row.get(5)?,
-                    ready_at: row.get(6)?,
-                })
-            })
-            .map_err(StoreError::from)?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row.map_err(StoreError::from)?);
-        }
-        Ok::<_, Error>(out)
-    })
+    let dir = store.dir().to_path_buf();
+    let ready = store.tx(|tx| versions::ready(tx, &dir))?;
+    Ok(ready
+        .into_iter()
+        .map(|v| GuideVersionOut {
+            version: v.version,
+            selection_kind: v.selection.kind,
+            snapshot_base: v.snapshot.base,
+            snapshot_head: v.snapshot.head,
+            selection_base: v.selection.base,
+            selection_head: v.selection.head,
+            ready_at: v.ready_at,
+        })
+        .collect())
 }
