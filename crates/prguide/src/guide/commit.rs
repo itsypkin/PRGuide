@@ -334,7 +334,10 @@ fn copy_file(src: &Path, dst: &Path, lstat: &fs::Metadata, shown: &str) -> Resul
 }
 
 /// Copies `guide.yaml` and `slides/<id>.md` from the draft into `dst`, which
-/// already holds an empty `slides/`. Nothing is followed.
+/// already holds an empty `slides/`. Each entry is inspected without following
+/// links and the opened file must be the inspected one; a directory swapped for a
+/// symlink between the walk's steps (e.g. `slides/` after the first slide) is a
+/// race this does not close, and the copy is still checked.
 fn copy_draft(src: &Path, dst: &Path) -> Result<(), CopyErr> {
     let meta = fs::symlink_metadata(src).map_err(|_| reject(".", CHANGED))?;
     if meta.file_type().is_symlink() {

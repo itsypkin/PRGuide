@@ -1562,3 +1562,54 @@ fn draft_argument_relative_to_the_clone() {
     assert_eq!(v.version, 1);
     assert_eq!(tree(&v.dir), tree(&ctx.draft));
 }
+
+#[test]
+fn reconcile_rollback_touches_only_its_own_refs() {
+    let ctx = Ctx::new();
+    ctx.ok(&ctx.draft, None);
+    let sha = ctx.out.snapshot.head.clone();
+    let other = "refs/prguide/8/fetch/head".to_owned();
+    ctx.git()
+        .write_refs(&[(other.clone(), sha.clone())])
+        .unwrap();
+    let names = ["refs/prguide/7/v1/snapshot-head", other.as_str()];
+    let json: Vec<_> = names
+        .iter()
+        .map(|n| serde_json::json!({"name": n, "sha": sha}))
+        .collect();
+    ctx.insert_version(2, "staging", None, &serde_json::to_string(&json).unwrap());
+    assert_eq!(ctx.bin_status().status.code(), Some(0));
+    assert_eq!(ctx.refs(1).len(), 4);
+    assert_eq!(ctx.git().list_refs("refs/prguide/8").unwrap().len(), 1);
+    assert_eq!(
+        ctx.count("SELECT COUNT(*) FROM guide_versions WHERE version = 2 AND state = 'staging'"),
+        1
+    );
+}
+
+#[test]
+fn reconcile_finish_writes_only_its_own_refs() {
+    let ctx = Ctx::new();
+    ctx.ok(&ctx.draft, None);
+    let before = ctx.refs(1);
+    fs::create_dir_all(ctx.sdir().join("guides/v2")).unwrap();
+    let json = serde_json::json!([{"name": "refs/prguide/7/v1/selection-head", "sha": ctx.out.snapshot.base}]);
+    ctx.insert_version(2, "staging", None, &json.to_string());
+    assert_eq!(ctx.bin_status().status.code(), Some(0));
+    assert_eq!(ctx.refs(1), before);
+    assert_eq!(
+        ctx.count("SELECT COUNT(*) FROM guide_versions WHERE version = 2 AND state = 'staging'"),
+        1
+    );
+}
+
+#[test]
+fn a_symlinked_commit_lock_creates_nothing_outside() {
+    let ctx = Ctx::new();
+    let outside = TempDir::new().unwrap();
+    let target = outside.path().join("created");
+    symlink(&target, ctx.sdir().join("commit.lock")).unwrap();
+    let err = ctx.err(&ctx.draft, None);
+    assert_eq!(err.code(), "store_io");
+    assert!(!exists(&target));
+}

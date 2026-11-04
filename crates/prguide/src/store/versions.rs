@@ -243,6 +243,12 @@ pub fn finish(
 /// Opens (creating) the commit lock file.
 pub fn open_lock(store_dir: &Path) -> Result<RwLock<File>, StoreError> {
     let path = store_dir.join(COMMIT_LOCK);
+    if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(StoreError::Io {
+            path,
+            source: std::io::Error::other("is a symlink; prguide does not lock through a link"),
+        });
+    }
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -303,7 +309,15 @@ pub fn rollback(store: &mut Store, git: &Git, k: i64, refs: &[PinnedRef]) -> Res
 pub fn reconcile(store: &mut Store, git: &Git) -> Result<(), Error> {
     let store_dir = store.dir().to_path_buf();
     let rows = store.tx(|tx| list(tx, &store_dir, "staging"))?;
+    let number = store.pr().number();
     for row in rows {
+        let own = format!("refs/prguide/{number}/v{}/", row.version);
+        if let Some(bad) = row.refs.iter().find(|r| !r.name.starts_with(&own)) {
+            return Err(Error::Internal(format!(
+                "guide version {} lists ref {}, which is outside {own}; it needs fixing by hand",
+                row.version, bad.name
+            )));
+        }
         let published = guide_dir(&store_dir, row.version);
         let is_dir = match fs::symlink_metadata(&published) {
             Ok(meta) => meta.is_dir(),
